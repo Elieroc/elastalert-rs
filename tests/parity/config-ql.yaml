@@ -1,0 +1,12 @@
+rules_folder: rules-ql
+run_every:
+  minutes: 1
+buffer_time:
+  minutes: 15
+es_host: 127.0.0.1
+es_port: 19200
+writeback_index: elastalert_parity_ql
+use_local_time: false
+old_query_limit:
+  weeks: 8
+max_threads: 1

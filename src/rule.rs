@@ -1,6 +1,8 @@
 //! Rule files: discovery, `import:` chains, defaults inherited from config.yaml, validation.
 
 use crate::config::{Config, read_yaml};
+use crate::enhancements::Enhancement;
+use crate::querylang::{self, QueryLang};
 use crate::time::{Dur, MINUTE, SECOND, parse_duration_map};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
@@ -97,6 +99,16 @@ pub struct Rule {
     pub sync_bucket_interval: bool,
     pub allow_buffer_time_overlap: bool,
     pub alerts: Vec<String>,
+    /// `limit_execution`: cron expression of the periods the rule is active in.
+    pub limit_execution: Option<String>,
+    /// `limit_execution_coverage`: do not catch up on the time skipped between two active periods.
+    pub limit_execution_coverage: bool,
+    pub kibana_discover: bool,
+    pub opensearch_discover: bool,
+    pub enhancements: Vec<Enhancement>,
+    pub run_enhancements_first: bool,
+    /// Set when a `filter` entry is an `eql` or `esql` query.
+    pub query_lang: Option<QueryLang>,
     /// The merged rule document; alert text and alerters read arbitrary keys from it.
     pub raw: Map<String, Value>,
 }
@@ -247,17 +259,40 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         Some("spike_aggregation") => Kind::SpikeAggregation,
         other => bail!("rule type {other:?} is not supported yet"),
     };
-    for unsupported in [
-        "limit_execution",
-        "generate_kibana_discover_url",
-        "generate_opensearch_discover_url",
-        "match_enhancements",
-        "jinja_filters",
-        "include_rule_params_in_matches",
-    ] {
+    for unsupported in ["include_rule_params_in_matches"] {
         if raw.get(unsupported).is_some_and(|v| !matches!(v, Value::Bool(false) | Value::Null)) {
             bail!("option {unsupported} is not supported yet");
         }
+    }
+    let flag = |raw: &Map<String, Value>, k: &str| raw.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let limit_execution = match raw.get("limit_execution") {
+        None | Some(Value::Null | Value::Bool(false)) => None,
+        Some(Value::String(c)) if c.trim().is_empty() => None,
+        Some(Value::String(c)) => {
+            c.parse::<croner::Cron>().map_err(|e| anyhow::anyhow!("invalid limit_execution cron expression {c:?}: {e}"))?;
+            Some(c.clone())
+        }
+        Some(_) => bail!("limit_execution must be a cron expression string"),
+    };
+    let (kibana_discover, opensearch_discover) = (flag(&raw, "generate_kibana_discover_url"), flag(&raw, "generate_opensearch_discover_url"));
+    if kibana_discover {
+        crate::discover::validate_kibana(&raw)?;
+    }
+    if opensearch_discover {
+        crate::discover::validate(&raw, "opensearch")?;
+    }
+    let enhancements = match raw.get("match_enhancements") {
+        None | Some(Value::Null) => vec![],
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| v.as_str().context("match_enhancements entries must be strings").and_then(Enhancement::from_name))
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => bail!("match_enhancements must be a list"),
+    };
+    match raw.get("jinja_filters") {
+        None | Some(Value::Null | Value::Bool(false)) => {}
+        Some(Value::Array(a)) if a.is_empty() => {}
+        Some(_) => bail!("jinja_filters name Python classes, which cannot be loaded: custom Jinja filters are not supported"),
     }
     let aggregation = match raw.get("aggregation") {
         None | Some(Value::Null) => None,
@@ -477,11 +512,20 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     };
 
     resolve_refs(&mut raw);
-    let filter = match raw.get("filter") {
+    let mut filter = match raw.get("filter") {
         None | Some(Value::Null) => vec![],
         Some(Value::Array(a)) => a.clone(),
         Some(_) => bail!("filter must be a list"),
     };
+    let max_query_size = raw.get("max_query_size").and_then(Value::as_u64).unwrap_or(conf.max_query_size);
+    let query_lang = querylang::detect(&filter)?;
+    if let Some(lang) = query_lang {
+        let what = lang.key();
+        if use_count_query || use_terms_query || kind.is_agg_query() || kind == Kind::NewTerm || !top_count_keys.is_empty() {
+            bail!("{what} filters only work with plain hit queries: not with use_count_query, use_terms_query, top_count_keys, new_term or the aggregation rule types");
+        }
+        querylang::apply_limit(&mut filter, max_query_size);
+    }
 
     Ok(Rule {
         realert: dur_opt(&raw, "realert")?.unwrap_or(if aggregation.is_some() { 0 } else { MINUTE }),
@@ -513,10 +557,17 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         jinja_template,
         use_strftime_index: raw.get("use_strftime_index").and_then(Value::as_bool).unwrap_or(false),
         search_extra_index: raw.get("search_extra_index").and_then(Value::as_bool).unwrap_or(false),
-        enrich,
+        enrich: enrich && query_lang.is_none(),
         attach_related: raw.get("attach_related").and_then(Value::as_bool).unwrap_or(false),
         scan_entire_timeframe: raw.get("scan_entire_timeframe").and_then(Value::as_bool).unwrap_or(false),
-        max_query_size: raw.get("max_query_size").and_then(Value::as_u64).unwrap_or(conf.max_query_size),
+        max_query_size,
+        limit_execution,
+        limit_execution_coverage: flag(&raw, "limit_execution_coverage"),
+        kibana_discover,
+        opensearch_discover,
+        enhancements,
+        run_enhancements_first: flag(&raw, "run_enhancements_first"),
+        query_lang,
         max_scrolling_count: raw.get("max_scrolling_count").and_then(Value::as_u64).unwrap_or(conf.max_scrolling_count),
         index: raw["index"].as_str().context("index must be a string")?.to_string(),
         name,
@@ -637,5 +688,54 @@ mod tests {
         assert_eq!(raw["filter"], json!([{"term": {"a": 1}}, {"term": {"b": 2}}]));
         assert!(!raw.contains_key("import"));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn load_text(name: &str, extra: &str) -> Result<Rule> {
+        let dir = std::env::temp_dir().join(format!("ea-rule-opts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{name}.yaml"));
+        std::fs::write(&file, format!("name: {name}\ntype: any\nindex: logs-*\nalert: debug\n{extra}")).unwrap();
+        let conf = Config::load_with_defaults(&dir.join("none.yaml")).unwrap();
+        load(&file, &conf)
+    }
+
+    #[test]
+    fn limit_execution_is_validated() {
+        let r = load_text("le_ok", "limit_execution: \"* 10-18 * * 1-5\"\nlimit_execution_coverage: true\n").unwrap();
+        assert_eq!(r.limit_execution.as_deref(), Some("* 10-18 * * 1-5"));
+        assert!(r.limit_execution_coverage);
+        assert!(load_text("le_off", "limit_execution: false\n").unwrap().limit_execution.is_none());
+        let err = load_text("le_bad", "limit_execution: not a cron\n").err().unwrap();
+        assert!(format!("{err:#}").contains("limit_execution"), "{err:#}");
+    }
+
+    #[test]
+    fn enhancements_and_jinja_filters() {
+        let r = load_text("me_ok", "match_enhancements: [TimeEnhancement]\nrun_enhancements_first: true\njinja_filters: []\n").unwrap();
+        assert_eq!(r.enhancements, vec![Enhancement::Time]);
+        assert!(r.run_enhancements_first);
+        assert!(load_text("me_bad", "match_enhancements: [my.mod.Class]\n").is_err());
+        assert!(load_text("jf_bad", "jinja_filters: [filters.domain.DomainFilters]\n").is_err());
+    }
+
+    #[test]
+    fn eql_and_esql_filters() {
+        let r = load_text("eql_ok", "filter:\n- eql: 'process where process.name == \"x\"'\n").unwrap();
+        assert_eq!(r.query_lang, Some(QueryLang::Eql));
+        assert!(!r.enrich);
+        let r = load_text("esql_ok", "max_query_size: 50\nfilter:\n- esql: 'FROM logs-* | WHERE a > 1'\n").unwrap();
+        assert_eq!(r.query_lang, Some(QueryLang::Esql));
+        assert_eq!(r.filter[0]["esql"], json!("FROM logs-* | WHERE a > 1\n| limit 50"));
+        assert!(load_text("eql_count", "use_count_query: true\ndoc_type: x\nfilter:\n- eql: 'any where true'\n").is_err());
+        assert!(load_text("both", "filter:\n- eql: 'any where true'\n- esql: 'FROM x'\n").is_err());
+        assert_eq!(load_text("plain", "filter:\n- term: {a: 1}\n").unwrap().query_lang, None);
+    }
+
+    #[test]
+    fn discover_options_are_validated() {
+        let r = load_text("kb_ok", "generate_kibana_discover_url: true\nkibana_discover_app_url: x\nkibana_discover_index_pattern_id: y\nkibana_discover_from_timedelta: {minutes: 5}\n").unwrap();
+        assert!(r.kibana_discover && !r.opensearch_discover);
+        assert!(load_text("kb_bad", "generate_kibana_discover_url: true\nkibana_discover_from_timedelta: {parsecs: 5}\n").is_err());
+        assert!(load_text("os_bad", "generate_opensearch_discover_url: true\nopensearch_discover_columns: []\n").is_err());
     }
 }

@@ -1,0 +1,9 @@
+name: eql_eve
+type: any
+index: logs-parity
+filter:
+- eql: 'any where user.name == "eve" and event.outcome == "failure"'
+alert: debug
+alert_text: "{0} {1}"
+alert_text_args: [user.name, _index]
+realert: {seconds: 0}

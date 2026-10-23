@@ -3,10 +3,12 @@
 
 use crate::alert;
 use crate::alerters::{Alerter, View};
+use crate::discover;
 use crate::es::Es;
 use crate::field::{self, py_str};
 use crate::index;
 use crate::metrics::Metrics;
+use crate::querylang::{self, QueryLang};
 use crate::rule::{Aggregation, Rule, TsType};
 use crate::time::{Dur, MINUTE, SECOND, Ts, now, parse_iso, pretty, to_iso};
 use crate::types::{Event, RuleType, parse_ts, ts_value};
@@ -102,6 +104,10 @@ pub struct RuleState {
     seen: FxHashMap<u64, Ts>,
     /// Documents to query instead of ES (`test-rule --data`).
     pub mock: Option<Vec<Doc>>,
+    /// `limit_execution`: whether a run has happened since the rule was (re)loaded.
+    pub has_run_once: bool,
+    /// `limit_execution_coverage`: where the next run resumes after a pause.
+    next_min_start: Option<Ts>,
     /// Counters for the current run.
     hits: u64,
     dupes: u64,
@@ -135,6 +141,8 @@ impl RuleState {
             bucket_offset: 0,
             seen: FxHashMap::default(),
             mock: None,
+            has_run_once: false,
+            next_min_start: None,
             hits: 0,
             dupes: 0,
             alerts_sent: AtomicU64::new(0),
@@ -156,6 +164,8 @@ impl RuleState {
             bucket_offset: 0,
             seen: FxHashMap::default(),
             mock: None,
+            has_run_once: false,
+            next_min_start: None,
             hits: 0,
             dupes: 0,
             alerts_sent: AtomicU64::new(0),
@@ -321,6 +331,9 @@ impl RuleState {
             self.rtype.add_terms(&self.rule, end, &buckets, matches);
             return Ok(());
         }
+        if let Some(lang) = self.rule.query_lang {
+            return self.lang_query(ctx, lang, &index, start, end, matches).await;
+        }
         let body = self.query(start, end);
         if ctx.use_pit && ctx.es.supports_pit().await {
             match ctx.es.pit_open(&index, "1m").await {
@@ -329,6 +342,33 @@ impl RuleState {
             }
         }
         self.scroll_pages(ctx, start, end, &index, body, matches).await
+    }
+
+    /// EQL / ES|QL rules: one request per range, no paging (upstream cannot page them either), so results beyond
+    /// `max_query_size` are lost and a warning says so.
+    async fn lang_query(&mut self, ctx: &Ctx, lang: QueryLang, index: &str, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
+        let size = self.rule.max_query_size;
+        let query = self.filters(start, end, vec![]);
+        let body = querylang::request(&query, lang, size, &self.rule.timestamp_field).with_context(|| format!("no {} query found in the rule filter", lang.key()))?;
+        let (hits, total) = match lang {
+            QueryLang::Eql => {
+                let mut resp = ctx.es.eql_search(index, &body).await?;
+                let total = resp.pointer("/hits/total/value").and_then(Value::as_u64).unwrap_or(0);
+                (querylang::eql_hits(&mut resp)?, total)
+            }
+            QueryLang::Esql => {
+                let resp = ctx.es.esql_query(&body).await?;
+                let hits = querylang::esql_hits(&resp, index);
+                let n = hits.len() as u64;
+                (hits, n)
+            }
+        };
+        let n = hits.len() as u64;
+        self.on_hits(ctx, start, end, hits, false, matches)?;
+        if size > 0 && (total > n || n >= size) {
+            log::warn!("Rule {}: {} queries cannot be paged, results beyond max_query_size ({size}) are not seen", self.rule.name, lang.key());
+        }
+        Ok(())
     }
 
     /// metric_aggregation / percentage_match / spike_aggregation: the rule's aggregation, optionally split by
@@ -483,6 +523,30 @@ impl RuleState {
         result
     }
 
+    // ---- limit_execution ----
+
+    /// `limit_execution`: when the run after this one would fall outside the cron window, the time the rule
+    /// should wake up at instead. Remembers where to resume when `limit_execution_coverage` is on.
+    pub fn limit_check(&mut self, endtime: Ts) -> Option<Ts> {
+        self.next_min_start = None;
+        let cron = self.rule.limit_execution.as_deref()?.parse::<croner::Cron>().ok()?;
+        let next = cron.find_next_occurrence(&chrono::Utc::now(), false).ok()?.timestamp_micros();
+        let until = pause_until(next, endtime, self.rule.run_every)?;
+        if self.rule.limit_execution_coverage {
+            self.next_min_start = Some(until);
+        }
+        Some(until)
+    }
+
+    /// The rule sleeps until `until`; with coverage on, the skipped time is not queried afterwards.
+    pub fn pause(&mut self, until: Ts, ts_fmt: Option<&str>) {
+        if let Some(t) = self.next_min_start {
+            self.minimum_starttime = Some(t);
+            self.previous_endtime = Some(t);
+        }
+        log::info!("Pausing {} until next run at {}", self.rule.name, pretty(until, true, ts_fmt));
+    }
+
     // ---- run position ----
 
     /// Last `endtime` this rule recorded in the status index, if recent enough.
@@ -627,6 +691,10 @@ impl RuleState {
                 ctx.silences.set(&key, until, exponent);
                 let doc = json!({"exponent": exponent, "rule_name": key, "@timestamp": to_iso(now()), "until": to_iso(until)});
                 ctx.writeback.write(Wb::Silence, doc.as_object().cloned().unwrap_or_default()).await;
+            }
+            if self.rule.run_enhancements_first {
+                // Upstream logs a failing enhancement and keeps the match.
+                self.enhance_one(ctx, &mut m).await;
             }
             if self.rule.aggregation.is_some() {
                 self.add_aggregated(ctx, m).await;
@@ -887,9 +955,53 @@ impl RuleState {
         }
     }
 
-    async fn alert(&mut self, ctx: &Ctx, mut matches: Vec<Doc>) {
+    /// Runs every enhancement on a match. Returns false when one failed.
+    async fn enhance_one(&self, ctx: &Ctx, m: &mut Doc) -> bool {
+        let mut ok = true;
+        for e in &self.rule.enhancements {
+            if let Err(err) = e.process(m) {
+                ok = false;
+                ctx.metrics.error();
+                ctx.writeback.error(format!("Error running match enhancement: {err:#}"), json!({"rule": self.rule.name})).await;
+            }
+        }
+        ok
+    }
+
+    /// Everything a match gets right before alerting: top counts, Discover links (on the first match, as upstream)
+    /// and, unless `run_enhancements_first`, the enhancements. A match an enhancement fails on is dropped.
+    async fn finish(&self, ctx: &Ctx, mut matches: Vec<Doc>) -> Vec<Doc> {
         for m in &mut matches {
             self.add_top_counts(ctx, m).await;
+        }
+        if let Some(first) = matches.first_mut() {
+            if self.rule.kibana_discover
+                && let Some(url) = discover::kibana_link(&self.rule, first).await
+            {
+                first.insert("kibana_discover_url".into(), json!(url));
+            }
+            if self.rule.opensearch_discover
+                && let Some(url) = discover::opensearch_link(&self.rule, first)
+            {
+                first.insert("opensearch_discover_url".into(), json!(url));
+            }
+        }
+        if !self.rule.run_enhancements_first && !self.rule.enhancements.is_empty() {
+            let mut kept = Vec::with_capacity(matches.len());
+            for mut m in matches {
+                if self.enhance_one(ctx, &mut m).await {
+                    kept.push(m);
+                }
+            }
+            matches = kept;
+        }
+        matches
+    }
+
+    async fn alert(&mut self, ctx: &Ctx, matches: Vec<Doc>) {
+        let matches = self.finish(ctx, matches).await;
+        if matches.is_empty() {
+            return;
         }
         if ctx.debug {
             alert::debug_alert(&self.rule, &self.rtype, &matches, ctx.ts_fmt.as_deref());
@@ -1028,9 +1140,13 @@ impl RuleState {
     async fn flush_group(&mut self, ctx: &Ctx, key: &str) {
         let Some(g) = self.agg.remove(key) else { return };
         log::info!("Sending aggregated alert of {} ({} matches, aggregation_key: {key})", self.rule.name, g.matches.len());
-        let mut matches = g.matches;
-        for m in &mut matches {
-            self.add_top_counts(ctx, m).await;
+        let matches = self.finish(ctx, g.matches).await;
+        if matches.is_empty() {
+            // Every match was dropped by an enhancement: the pending docs have nothing left to send.
+            for id in g.child_ids.iter().chain([&g.head_id]) {
+                ctx.writeback.delete_id(Wb::Alert, id).await;
+            }
+            return;
         }
         if ctx.debug {
             alert::debug_alert(&self.rule, &self.rtype, &matches, ctx.ts_fmt.as_deref());
@@ -1073,6 +1189,11 @@ impl RuleState {
 
 /// Port of `next_alert_time`: with `exponential_realert` the silence doubles while matches keep coming.
 /// `cached` is the previous (until, exponent) for the same key.
+/// Upstream: pause unless the estimated next end time (`end + run_every`) is within a minute of the next cron time.
+fn pause_until(exec_next: Ts, endtime: Ts, run_every: Dur) -> Option<Ts> {
+    (endtime + run_every < exec_next - 59 * SECOND).then_some(exec_next)
+}
+
 fn next_alert(realert: Dur, max: Option<Dur>, cached: Option<(Ts, i32)>, ts: Ts) -> (Ts, i32) {
     let (Some((last_until, mut exponent)), Some(max)) = (cached, max) else {
         return (ts + realert, 0);
@@ -1096,6 +1217,26 @@ mod tests {
     use super::*;
 
     /// Expected values printed by upstream's `ElastAlerter.next_alert_time` for the same call sequence.
+    #[test]
+    fn limit_execution_pause_rule() {
+        let cron: croner::Cron = "* 10-18 * * 1-5".parse().unwrap();
+        let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+        let next = |now: &str| cron.find_next_occurrence(&at(now), false).unwrap().timestamp_micros();
+        let run_every = 5 * MINUTE;
+        // Wednesday noon: the next minute is inside the window, keep running.
+        let n = at("2026-10-21T12:00:30Z");
+        assert_eq!(pause_until(next("2026-10-21T12:00:30Z"), n.timestamp_micros(), run_every), None);
+        // Wednesday 18:58: 18:59 is still inside the window, run once more.
+        let n = at("2026-10-21T18:58:00Z");
+        assert_eq!(pause_until(next("2026-10-21T18:58:00Z"), n.timestamp_micros(), run_every), None);
+        // 19:03: the window is over, sleep until Thursday 10:00.
+        let n = at("2026-10-21T19:03:00Z");
+        assert_eq!(pause_until(next("2026-10-21T19:03:00Z"), n.timestamp_micros(), run_every), Some(at("2026-10-22T10:00:00Z").timestamp_micros()));
+        // Friday evening: sleep until Monday morning.
+        let n = at("2026-10-23T20:00:00Z");
+        assert_eq!(pause_until(next("2026-10-23T20:00:00Z"), n.timestamp_micros(), run_every), Some(at("2026-10-26T10:00:00Z").timestamp_micros()));
+    }
+
     #[test]
     fn exponential_realert_matches_upstream() {
         let (realert, max) = (60 * SECOND, Some(600 * SECOND));

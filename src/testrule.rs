@@ -202,6 +202,11 @@ fn read_docs(path: &Path) -> Result<Vec<Map<String, Value>>> {
 
 /// Shows hit count and the fields of one document; returns up to `max_query_size` hits when they are needed.
 async fn query_es(args: &TestRuleArgs, rule: &rule::Rule, es: &Es, start: Ts, end: Ts, formatted: &mut Map<String, Value>) -> Option<Vec<Value>> {
+    if let Some(lang) = rule.query_lang {
+        // The preview uses plain searches and counts; an EQL / ES|QL rule goes straight to the run below.
+        println!("Skipping the hit count preview: {} queries are run as part of the rule.", lang.key());
+        return None;
+    }
     let st = RuleState::new_for_query(rule);
     let index = match st.index_for(start, end) {
         Ok(i) => i,

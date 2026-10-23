@@ -203,7 +203,13 @@ Rejected at load: `use_count_query` / `use_terms_query`, `ingest_timestamp_field
 | `top_count_keys`, `top_count_number`, `raw_count_keys` | supported |
 | `alert_text`, `alert_text_args`, `alert_text_kw`, `alert_text_type` (`alert_text_only`, `exclude_fields`, `alert_text_jinja`, `aggregation_summary_only`), `alert_subject`, `alert_subject_args`, `alert_subject_max_len`, `alert_missing_value`, `jinja_template_path` | supported (Python `str.format` subset: `{}`, `{0}`, `{name}`; format specs such as `{:>5}` are ignored) |
 | `attach_related`, `filter_by_list`, `!file` entries in `blacklist` / `whitelist`, `terms_window_size`, `alert_on_new_data`, `field_value`, `forget_keys`, ... | supported (per rule type options as documented upstream) |
-| `limit_execution`, `generate_kibana_discover_url`, `generate_opensearch_discover_url`, `match_enhancements`, `jinja_filters`, `include_rule_params_in_matches`, `_source_enabled: false` | **not supported**: the rule is rejected at load with a message |
+| `limit_execution` (cron, UTC), `limit_execution_coverage` | supported: outside the cron window the rule sleeps until the next one (`Pausing <rule> until next run at ...`); a rule that has not run since it was loaded does not run at all until then. Like upstream, `limit_execution_coverage` skips the time between two windows instead of catching up. Not applied to `--debug` / `--start` replays and `test-rule` (upstream would not run the rule at all there) |
+| `generate_kibana_discover_url`, `kibana_url`, `kibana_discover_app_url`, `kibana_discover_index_pattern_id`, `kibana_discover_columns`, `kibana_discover_from_timedelta`, `kibana_discover_to_timedelta`, `kibana_discover_security_tenant`, `shorten_kibana_discover_url`, `kibana_discover_version`, `kibana_username` / `kibana_password` / `kibana_verify_certs` (shortener) | supported: `kibana_discover_url` is added to the first match, byte-identical to upstream's link (compared in unit tests and in `tests/parity/rules-ql`). Shortening calls Kibana's short URL API; AWS SigV4 for it is rejected at load |
+| `generate_opensearch_discover_url`, `opensearch_url`, `opensearch_discover_app_url`, `opensearch_discover_index_pattern_id`, `opensearch_discover_columns`, `opensearch_discover_from_timedelta`, `opensearch_discover_to_timedelta` | supported: `opensearch_discover_url` is added to the first match. A missing app URL or index pattern id logs a warning and the alert goes out without a link, as upstream |
+| `filter: [{eql: "..."}]`, `filter: [{esql: "..."}]` | supported (see [EQL and ES\|QL](#eql-and-esql-rules)) |
+| `match_enhancements`, `run_enhancements_first` | **only the built-in `TimeEnhancement`** (or `elastalert.enhancements.TimeEnhancement`); any other entry is a Python class and the rule is rejected at load |
+| `jinja_filters` | an empty list is accepted; a non-empty one names Python classes with `filter_*` methods and the rule is rejected at load |
+| `include_rule_params_in_matches`, `_source_enabled: false` | **not supported**: the rule is rejected at load with a message |
 | `es_host`, `es_port`, credentials, TLS options **inside a rule** (different cluster per rule) | **not supported**: rejected unless identical to `config.yaml` |
 | `ingest_timestamp_field` | **new**, see [Performance](#performance) |
 
@@ -218,7 +224,7 @@ ElastAlert 2 has 44 alerters. **5 are ported** (`debug`, `email`, `slack`, `post
 | --- | --- |
 | `debug` | supported |
 | `email` | supported: `email`, `cc`, `bcc`, `smtp_host`, `smtp_port`, `smtp_ssl`, STARTTLS, `smtp_auth_file`, `from_addr`, `email_reply_to`, `email_format: html`, `email_from_field`, `email_add_domain`. **Not**: `email_image_keys` / `assets_dir` (inline images), `smtp_cert_file` / `smtp_key_file` (a warning is logged) |
-| `slack` | supported: webhook URL(s), channel overrides (one message per channel), username, emoji / icon, colour, title, fields, footer, author, image, pretext, proxy, CA file, timeout, aggregation table in a code block. **Not**: Kibana / OpenSearch / Jira attachment links |
+| `slack` | supported: webhook URL(s), channel overrides (one message per channel), username, emoji / icon, colour, title, fields, footer, author, image, pretext, proxy, CA file, timeout, aggregation table in a code block. `slack_attach_kibana_discover_url` / `slack_attach_opensearch_discover_url` with their colour and title. **Not**: Jira attachment link |
 | `post` | supported: `http_post_url` (list), `http_post_payload`, `http_post_static_payload`, `http_post_all_values`, `http_post_headers`, proxy, CA file, timeout, ignore SSL errors |
 | `command` | supported: argument list or shell string, `{field}` / `%(field)s` substitution, `pipe_match_json`, `pipe_alert_text`, `fail_on_non_zero_exit` |
 | `post2`, `mattermost`, `ms_power_automate`, `discord`, `telegram`, `googlechat`, `rocketchat`, `webex_webhook`, `matrixhookshot`, `gitter`, `lark`, `dingtalk`, `workwechat`, `chatwork`, `line`, `yzj` | **not ported** (chat webhooks: the easiest to add) |
@@ -248,12 +254,30 @@ Each alerter has its own delivery state: if Slack is down and email works, only 
 **Not covered** (summary; details in the tables above)
 
 - 39 of 44 alerters, notably PagerDuty, Opsgenie, Jira, TheHive, Teams, Mattermost, Discord, Telegram, SNS/SES, Zabbix.
-- `limit_execution`, Kibana / OpenSearch Discover links, EQL and ES|QL rules, `match_enhancements`, `jinja_filters`.
+- Python match enhancements (only `TimeEnhancement` is built in) and custom `jinja_filters`.
 - `notify_alert` (error notifications through alerters), statsd, AWS SigV4 signing, `replace_dots_in_field_names`.
 - Per-rule Elasticsearch connections, Python plugins of any kind (rule types, alerters, loaders, enhancements, filters), Python `logging:` config.
 - Helm chart.
 - Elasticsearch older than 7 and any cluster not listed above.
 - High availability: do not run two instances against the same writeback index, they would alert twice (same as two ElastAlert 2 instances).
+
+### EQL and ES|QL rules
+
+Put the query in a `filter` entry, as in ElastAlert 2:
+
+```yaml
+filter:
+- eql: 'any where user.name == "eve" and event.outcome == "failure"'
+# or
+- esql: 'FROM logs-* METADATA _id, _index, _source | WHERE event.outcome == "failure"'
+```
+
+The time range and the other `filter` entries go in the request's `filter`; one request per range, results capped at `max_query_size`
+(EQL `size`; ES|QL gets `| limit <max_query_size>` appended). Neither language can be paged, so a warning is logged when the cap is reached.
+The rule types that read documents (`any`, `frequency`, `spike`, `flatline`, `blacklist`, `whitelist`, `change`, `cardinality`) work;
+`use_count_query`, `use_terms_query`, `top_count_keys`, `new_term` and the aggregation rule types are rejected at load.
+Whole documents are fetched (no field projection). ES|QL needs Elasticsearch 8.14+, EQL 7.9+; OpenSearch has neither.
+Tested on Elasticsearch 8.15.5: same alerts as ElastAlert 2 (`tests/parity/rules-ql`).
 
 ## Differences from ElastAlert 2
 
@@ -277,6 +301,11 @@ Deliberate or unavoidable differences in behaviour:
 | Log lines | `INFO:elastalert:...` per call | same text; the two lines of a debug alert are emitted in one call so parallel rules do not interleave them |
 | Concurrency | thread pool | one task per rule, `max_threads` limits concurrent runs |
 | `disabled rules` log | printed every cycle | printed only when some exist |
+| EQL sequence / join queries | no events, silently | the run fails with an error (only event queries work) |
+| EQL `timestamp_field` | always the Elasticsearch default `@timestamp` | the rule's `timestamp_field` is sent when it is not `@timestamp` |
+| Discover link that cannot be built (bad `kibana_url`, shortener unreachable) | the rule run fails and the alert is not sent | an error is logged and the alert goes out without the link |
+| Discover filters | `meta.value` keeps the key order of the YAML | keys are sorted (display text of the filter pill only) |
+| `TimeEnhancement` with `frequency`, `spike`, `flatline`, `cardinality` | the sentence about the time range is built from the rewritten `@timestamp`, with a time zone that depends on the host | the sentence is left out, because the timestamp is no longer one |
 
 New options that ElastAlert 2 does not have: `ingest_timestamp_field`, `fetch_full_source`, `use_pit`, `validate`, `--es_debug_trace` with responses.
 
@@ -302,7 +331,7 @@ Late documents (old event time, new ingest time) are then found exactly once. Wi
 ## Testing
 
 ```sh
-cargo test                                   # 24 unit tests, including golden outputs generated by upstream code
+cargo test                                   # 43 unit tests, including golden outputs generated by upstream code
 ```
 
 Integration and parity harnesses need a throwaway Elasticsearch (not included in `cargo test`):
@@ -310,7 +339,8 @@ Integration and parity harnesses need a throwaway Elasticsearch (not included in
 | Path | What it checks |
 | --- | --- |
 | `tests/parity/` | `seed.py` loads 3,000 deterministic documents, 37 rules cover every supported rule type and many options (the `agg_*` rules: the three aggregation types), `diff.py` compares the alerts of Python ElastAlert 2.31.0 and this program replaying the same range with `--debug`. Last result: **931 alerts, identical** |
-| `tests/golden/` | Aggregation summary tables printed by upstream (`texttable`, markdown), compared byte for byte in a unit test |
+| `tests/parity/rules-ql/` | EQL, ES|QL, Kibana / OpenSearch Discover links (with `kibana_discover_security_tenant`) and `TimeEnhancement`; run it with `config-ql.yaml` the same way (needs Elasticsearch 8.14+). Last result: **203 alerts, identical** |
+| `tests/golden/` | Aggregation summary tables printed by upstream (`texttable`, markdown) and Discover / external URLs generated by upstream's `kibana_discover.py`, `opensearch_discover.py` and URL formatters (`discover.json`), compared in unit tests |
 | `tests/alerters/` | `sink.py` is a local SMTP + HTTP receiver; used to check email, Slack (two channels), post, command, partial failure and retry, recovery after restart |
 | `bench/` | 400,000-document dataset and 500-rule folder behind the numbers above |
 
@@ -331,6 +361,8 @@ python -m elastalert.elastalert --config config.yaml --debug --start 2026-10-01T
 python3 diff.py py.log rs.log
 ```
 
+The same with `config-ql.yaml` replays `rules-ql/` (writes to `elastalert_parity_ql*`).
+
 ## Layout
 
 ```
@@ -342,6 +374,9 @@ src/config.rs      config.yaml, environment overrides
 src/es.rs          Elasticsearch / OpenSearch REST client (PIT, scroll, bulk, mget, request tracing)
 src/alerters.rs    email, slack, post, command
 src/alert.rs       alert text (match body, subject, summary tables, jinja)
+src/discover.rs    Kibana / OpenSearch Discover links (Rison, URL formatters, Kibana short URLs)
+src/querylang.rs   EQL / ES|QL request and response conversion
+src/enhancements.rs match_enhancements (built-in TimeEnhancement)
 src/writeback.rs   bulk writer for the writeback indices
 src/testrule.rs    test-rule and validate
 src/metrics.rs     Prometheus endpoint

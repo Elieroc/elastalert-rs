@@ -1,0 +1,9 @@
+name: esql_eve
+type: any
+index: logs-parity
+filter:
+- esql: 'FROM logs-parity METADATA _id, _index, _source | WHERE user.name == "eve" AND event.outcome == "failure"'
+alert: debug
+alert_text: "{0} {1}"
+alert_text_args: [user.name, _index]
+realert: {seconds: 0}

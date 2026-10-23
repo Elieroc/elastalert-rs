@@ -336,6 +336,10 @@ impl Slack {
             ("slack_author_icon", json!("")),
             ("slack_msg_pretext", json!("")),
             ("slack_alert_fields", json!("")),
+            ("slack_kibana_discover_color", json!("#ec4b98")),
+            ("slack_kibana_discover_title", json!("Discover in Kibana")),
+            ("slack_opensearch_discover_color", json!("#ec4b98")),
+            ("slack_opensearch_discover_title", json!("Discover in Opensearch")),
         ] {
             opts.insert(key, rule.raw.get(key).cloned().unwrap_or(default));
         }
@@ -398,11 +402,19 @@ impl Slack {
                 att[key] = json!(o(opt));
             }
         }
+        let mut attachments = vec![att];
+        for (flag, kind) in [("slack_attach_kibana_discover_url", "kibana"), ("slack_attach_opensearch_discover_url", "opensearch")] {
+            if v.rule.raw.get(flag).and_then(Value::as_bool).unwrap_or(false)
+                && let Some(url) = matches[0].get(&format!("{kind}_discover_url")).and_then(Value::as_str).filter(|u| !u.is_empty())
+            {
+                attachments.push(json!({"color": o(&format!("slack_{kind}_discover_color")), "title": o(&format!("slack_{kind}_discover_title")), "title_link": url}));
+            }
+        }
         let mut payload = json!({
             "username": self.username,
             "parse": o("slack_parse_override"),
             "text": o("slack_text_string"),
-            "attachments": [att],
+            "attachments": attachments,
         });
         if o("slack_icon_url_override").is_empty() {
             payload["icon_emoji"] = json!(o("slack_emoji_override"));

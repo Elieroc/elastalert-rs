@@ -1,0 +1,21 @@
+name: discover_url
+type: frequency
+index: logs-parity
+num_events: 8
+timeframe: {minutes: 5}
+query_key: user.name
+filter:
+- term: {event.outcome: failure}
+generate_kibana_discover_url: true
+kibana_url: http://kibana:5601/
+kibana_discover_app_url: app/discover#/
+kibana_discover_index_pattern_id: abc-123
+kibana_discover_security_tenant: global
+generate_opensearch_discover_url: true
+opensearch_url: http://os:5601
+opensearch_discover_app_url: app/data-explorer/discover#
+opensearch_discover_index_pattern_id: abc-123
+alert: debug
+alert_text: "{0}\n{1}\n{2}"
+alert_text_args: [kibana_discover_url, opensearch_discover_url, num_hits]
+realert: {minutes: 30}

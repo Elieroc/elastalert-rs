@@ -36,7 +36,7 @@ Segmenting long ranges by buffer_time / run_every,scheduler,must,yes,yes,
 Resume from last endtime in writeback status (old_query_limit),scheduler,must,yes,yes,verified against status index (keyword mapping from create-index)
 Per-rule scheduler with run_every jitter and random first-run offset (0-15s),scheduler,must,yes,yes,"tokio task per rule, semaphore(max_threads), jitter, 0-15 s first offset"
 Internal jobs: pending-alerts + config-change every run_every,scheduler,must,yes,yes,config reload + silence refresh in the main loop; pending retries run at the start of each rule run; no apscheduler
-limit_execution (cron) + limit_execution_coverage,scheduler,could,yes,no,
+limit_execution (cron) + limit_execution_coverage,scheduler,could,yes,yes,"cron in UTC via croner; tested live (pauses outside the window, runs inside); not applied to --debug/--start replays"
 --start NOW / ISO and --end (single run then exit),cli,must,yes,yes,
 --rule single rule; --debug; --verbose; --config; --patience; --pin_rules; --es_debug; --es_debug_trace,cli,must,yes,yes,--es_debug logs requests; --es_debug_trace appends curl commands + responses to a file
 --silence unit=n [--silence_qk_value],cli,must,yes,yes,
@@ -60,14 +60,14 @@ Aggregation: aggregation timespan or cron schedule; aggregation_key; aggregate_b
 Pending-alert recovery after restart and retry of failed alerts (alert_time_limit),alerting,must,yes,yes,per-alerter retry with backoff (W10); recovered from ES at startup; tested
 top_count_keys / top_count_number,alerting,should,yes,yes,parity-tested; mock data supported in test-rule
 include_rule_params_in_matches,alerting,could,yes,no,
-Match enhancements (custom Python modules) + DropMatchException,alerting,skip,yes,no,Python plugin API; replace with a Rust trait or drop
+Match enhancements (custom Python modules) + DropMatchException,alerting,skip,yes,partial,"built-in TimeEnhancement and run_enhancements_first; Python modules are rejected at load"
 Custom Python rule/alerter modules via get_module,alerting,skip,yes,no,not portable to Rust
 alert_text / alert_text_args / alert_text_kw / alert_text_type / alert_subject(_args) / alert_missing_value,alert text,must,yes,partial,"alert_text args/kw, alert_subject(_args), alert_missing_value; no jinja; format specs ignored"
-Jinja alert text (alert_text_type alert_text_jinja jinja_template_path jinja_root_name jinja_filters),alert text,should,yes,yes,minijinja; alert_subject too; custom jinja_filters (Python modules) not supported
+Jinja alert text (alert_text_type alert_text_jinja jinja_template_path jinja_root_name jinja_filters),alert text,should,yes,yes,minijinja; alert_subject too; custom jinja_filters (Python modules) rejected at load
 Default match body text (rule name + get_match_str + sorted key: value),alert text,must,yes,yes,exact format matters for downstream parsers; parity-tested 81/81
 $rule_field$ references in alerter config,alerting,should,yes,yes,
 Alerter email (smtp host/port/ssl/starttls auth file cc bcc html images email_from_field),alerter,must,yes,partial,"smtp host/port/ssl/starttls/auth file, cc, bcc, html, reply-to, email_from_field; no images, no client cert"
-Alerter slack (webhook(s) attachments fields channel override proxy),alerter,must,yes,partial,"webhook(s), channels, attachment fields and styling, aggregation summary in a code block; no discover/jira attachments"
+Alerter slack (webhook(s) attachments fields channel override proxy),alerter,must,yes,partial,"webhook(s), channels, attachment fields and styling, aggregation summary in a code block, discover attachments; no jira attachment"
 Alerter post / http_post (payload map static payload headers proxy ca),alerter,must,yes,yes,"payload map, static payload, headers, proxy, CA, timeout"
 Alerter command (list or shell string; pipe_match_json; pipe_alert_text),alerter,must,yes,yes,"argv / shell string, field substitution, pipe_match_json, pipe_alert_text, fail_on_non_zero_exit"
 Alerter debug,alerter,must,yes,yes,
@@ -83,9 +83,9 @@ create_index CLI (elastalert-create-index),writeback,should,yes,yes,`elastalert 
 replace_dots_in_field_names,writeback,could,yes,no,
 Error handling: writeback error doc; disable_rules_on_error; notify_email / notify_alert / notify_all_errors,errors,must,yes,partial,"error docs and logs; disable_rules_on_error; notify_email and notify_all_errors (panic, rule load failure, any error); no notify_alert"
 test_rule CLI (--schema-only --days --start --end --data --alert --save-json --use-downloaded --max-query-size --count-only --formatted-output --stop-error),cli,should,yes,yes,"`elastalert test-rule`: schema-only, days/start/end, data, alert, save-json, use-downloaded, max-query-size, count-only, formatted-output, stop-error; output text not byte-identical to upstream"
-Kibana discover URL (generate_kibana_discover_url etc.),integration,could,yes,no,
-OpenSearch discover URL,integration,could,yes,no,
-EQL and ES|QL rule queries,query,could,yes,no,eql.py esql.py
+Kibana discover URL (generate_kibana_discover_url etc.),integration,could,yes,yes,"link identical to upstream (unit goldens + parity); shorten_kibana_discover_url with basic auth; no SigV4; slack_attach_kibana_discover_url"
+OpenSearch discover URL,integration,could,yes,yes,"link identical to upstream; slack_attach_opensearch_discover_url"
+EQL and ES|QL rule queries,query,could,yes,yes,"eql.py esql.py ported; parity-tested on ES 8.15; no paging; sequences rejected"
 Prometheus metrics endpoint (--prometheus_port),observability,should,yes,yes,`--prometheus_port/--prometheus_addr`; same metric names (_total suffix)
 statsd metrics (rule.time_taken query.hits already_seen.hits query.matches query.alerts_sent),observability,could,yes,no,
 Logging config (dictConfig) -> tracing,observability,should,yes,no,

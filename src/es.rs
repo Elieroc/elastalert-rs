@@ -273,6 +273,16 @@ impl Es {
         self.post(&format!("{index}/_search?ignore_unavailable=true&rest_total_hits_as_int=true"), body).await
     }
 
+    /// `POST <index>/_eql/search`; the body is the EQL request (`query`, `filter`, `size`).
+    pub async fn eql_search(&self, index: &str, body: &Value) -> Result<Value> {
+        self.post(&format!("{index}/_eql/search?ignore_unavailable=true"), body).await
+    }
+
+    /// `POST _query?format=json`: an ES|QL query (`query`, `filter`).
+    pub async fn esql_query(&self, body: &Value) -> Result<Value> {
+        self.post("_query?format=json", body).await
+    }
+
     /// Every hit of a query (scrolling), for startup scans.
     pub async fn scan(&self, index: &str, body: &Value, keepalive: &str) -> Result<Vec<Value>> {
         let mut out = Vec::new();

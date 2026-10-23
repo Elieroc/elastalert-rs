@@ -1,0 +1,327 @@
+{
+ "cases": [
+  {
+   "name": "plain",
+   "rule": {
+    "kibana_discover_app_url": "http://kibana:5601/#/discover",
+    "kibana_discover_index_pattern_id": "abc-1",
+    "opensearch_discover_app_url": "http://os:5601/app/data-explorer/discover#",
+    "opensearch_discover_index_pattern_id": "abc-1",
+    "timestamp_field": "@timestamp"
+   },
+   "match": {
+    "@timestamp": "2019-09-01T00:30:00Z"
+   },
+   "kibana": "http://kibana:5601/#/discover?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28columns%3A%21%28_source%29%2Cfilters%3A%21%28%29%2Cindex%3Aabc-1%2Cinterval%3Aauto%29",
+   "opensearch": "http://os:5601/app/data-explorer/discover#?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28discover%3A%28columns%3A%21%28_source%29%2CisDirty%3A%21f%2Csort%3A%21%28%29%29%2Cmetadata%3A%28indexPattern%3Aabc-1%2Cview%3Adiscover%29%29&_q=%28filters%3A%21%28%29%2Cquery%3A%28language%3Alucene%2Cquery%3A%27%27%29%29"
+  },
+  {
+   "name": "filters_qk",
+   "rule": {
+    "kibana_discover_app_url": "http://kibana:5601/#/discover",
+    "kibana_discover_index_pattern_id": "abc-1",
+    "opensearch_discover_app_url": "http://os:5601/app/data-explorer/discover#",
+    "opensearch_discover_index_pattern_id": "abc-1",
+    "timestamp_field": "@timestamp",
+    "filter": [
+     {
+      "term": {
+       "a": "it's!"
+      }
+     },
+     {
+      "query": {
+       "query_string": {
+        "query": "x:\"é y\""
+       }
+      }
+     }
+    ],
+    "query_key": "host",
+    "timeframe": {
+     "seconds": 300
+    },
+    "kibana_discover_columns": [
+     "a",
+     "b.c"
+    ],
+    "opensearch_discover_columns": [
+     "a",
+     "b.c"
+    ]
+   },
+   "match": {
+    "@timestamp": "2019-09-01T00:30:00.123Z",
+    "host": "srv 1"
+   },
+   "kibana": "http://kibana:5601/#/discover?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A25%3A00.123Z%27%2Cto%3A%272019-09-01T00%3A35%3A00.123Z%27%29%29&_a=%28columns%3A%21%28a%2Cb.c%29%2Cfilters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cbool%3A%28must%3A%21%28%28term%3A%28a%3A%27it%21%27s%21%21%27%29%29%2C%28query_string%3A%28query%3A%27x%3A%22%C3%A9%20y%22%27%29%29%29%29%2Cmeta%3A%28alias%3Afilter%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Abool%2Cnegate%3A%21f%2Ctype%3Acustom%2Cvalue%3A%27%7B%22must%22%3A%5B%7B%22term%22%3A%7B%22a%22%3A%22it%21%27s%21%21%22%7D%7D%2C%7B%22query_string%22%3A%7B%22query%22%3A%22x%3A%5C%22%5Cu00e9%20y%5C%22%22%7D%7D%5D%7D%27%29%29%2C%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Ahost%2Cnegate%3A%21f%2Cparams%3A%28query%3A%27srv%201%27%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%27srv%201%27%29%2Cquery%3A%28match%3A%28host%3A%28query%3A%27srv%201%27%2Ctype%3Aphrase%29%29%29%29%29%2Cindex%3Aabc-1%2Cinterval%3Aauto%29",
+   "opensearch": "http://os:5601/app/data-explorer/discover#?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A25%3A00.123Z%27%2Cto%3A%272019-09-01T00%3A35%3A00.123Z%27%29%29&_a=%28discover%3A%28columns%3A%21%28a%2Cb.c%29%2CisDirty%3A%21f%2Csort%3A%21%28%29%29%2Cmetadata%3A%28indexPattern%3Aabc-1%2Cview%3Adiscover%29%29&_q=%28filters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3Afilter%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Aquery%2Cnegate%3A%21f%2Ctype%3Acustom%2Cvalue%3A%27%7B%22bool%22%3A%7B%22must%22%3A%5B%7B%22term%22%3A%7B%22a%22%3A%22it%21%27s%21%21%22%7D%7D%2C%7B%22query_string%22%3A%7B%22query%22%3A%22x%3A%5C%22%5Cu00e9%20y%5C%22%22%7D%7D%5D%7D%7D%27%29%2Cquery%3A%28bool%3A%28must%3A%21%28%28term%3A%28a%3A%27it%21%27s%21%21%27%29%29%2C%28query_string%3A%28query%3A%27x%3A%22%C3%A9%20y%22%27%29%29%29%29%29%29%2C%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Ahost%2Cnegate%3A%21f%2Cparams%3A%28query%3A%27srv%201%27%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%27srv%201%27%29%2Cquery%3A%28match%3A%28host%3A%28query%3A%27srv%201%27%2Ctype%3Aphrase%29%29%29%29%29%2Cquery%3A%28language%3Alucene%2Cquery%3A%27%27%29%29"
+  },
+  {
+   "name": "compound",
+   "rule": {
+    "kibana_discover_app_url": "http://kibana:5601/#/discover",
+    "kibana_discover_index_pattern_id": "abc-1",
+    "opensearch_discover_app_url": "http://os:5601/app/data-explorer/discover#",
+    "opensearch_discover_index_pattern_id": "abc-1",
+    "timestamp_field": "@timestamp",
+    "query_key": [
+     "a",
+     "b"
+    ],
+    "kibana_discover_from_timedelta": {
+     "seconds": 3600
+    },
+    "opensearch_discover_to_timedelta": {
+     "seconds": 30
+    }
+   },
+   "match": {
+    "@timestamp": "2019-09-01T00:30:00Z",
+    "a": 5,
+    "b": null
+   },
+   "kibana": "http://kibana:5601/#/discover?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-08-31T23%3A30%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28columns%3A%21%28_source%29%2Cfilters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Aa%2Cnegate%3A%21f%2Cparams%3A%28query%3A5%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%275%27%29%2Cquery%3A%28match%3A%28a%3A%28query%3A5%2Ctype%3Aphrase%29%29%29%29%2C%28%27%24state%27%3A%28store%3AappState%29%2Cexists%3A%28field%3Ab%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Ab%2Cnegate%3A%21t%2Ctype%3Aexists%2Cvalue%3Aexists%29%29%29%2Cindex%3Aabc-1%2Cinterval%3Aauto%29",
+   "opensearch": "http://os:5601/app/data-explorer/discover#?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A30%3A30Z%27%29%29&_a=%28discover%3A%28columns%3A%21%28_source%29%2CisDirty%3A%21f%2Csort%3A%21%28%29%29%2Cmetadata%3A%28indexPattern%3Aabc-1%2Cview%3Adiscover%29%29&_q=%28filters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Aa%2Cnegate%3A%21f%2Cparams%3A%28query%3A5%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%275%27%29%2Cquery%3A%28match%3A%28a%3A%28query%3A5%2Ctype%3Aphrase%29%29%29%29%2C%28%27%24state%27%3A%28store%3AappState%29%2Cexists%3A%28field%3Ab%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Ab%2Cnegate%3A%21t%2Ctype%3Aexists%2Cvalue%3Aexists%2Cview%3Adiscover%29%29%29%2Cquery%3A%28language%3Alucene%2Cquery%3A%27%27%29%29"
+  },
+  {
+   "name": "listqk",
+   "rule": {
+    "kibana_discover_app_url": "http://kibana:5601/#/discover",
+    "kibana_discover_index_pattern_id": "abc-1",
+    "opensearch_discover_app_url": "http://os:5601/app/data-explorer/discover#",
+    "opensearch_discover_index_pattern_id": "abc-1",
+    "timestamp_field": "@timestamp",
+    "query_key": "tags"
+   },
+   "match": {
+    "@timestamp": "2019-09-01T00:30:00Z",
+    "tags": [
+     "x"
+    ]
+   },
+   "kibana": "http://kibana:5601/#/discover?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28columns%3A%21%28_source%29%2Cfilters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Atags%2Cnegate%3A%21f%2Cparams%3A%28query%3Ax%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3Ax%29%2Cquery%3A%28match%3A%28tags%3A%28query%3Ax%2Ctype%3Aphrase%29%29%29%29%29%2Cindex%3Aabc-1%2Cinterval%3Aauto%29",
+   "opensearch": "http://os:5601/app/data-explorer/discover#?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28discover%3A%28columns%3A%21%28_source%29%2CisDirty%3A%21f%2Csort%3A%21%28%29%29%2Cmetadata%3A%28indexPattern%3Aabc-1%2Cview%3Adiscover%29%29&_q=%28filters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Atags%2Cnegate%3A%21f%2Cparams%3A%28query%3A%21%28x%29%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%27%5B%21%27x%21%27%5D%27%29%2Cquery%3A%28match%3A%28tags%3A%28query%3A%21%28x%29%2Ctype%3Aphrase%29%29%29%29%29%2Cquery%3A%28language%3Alucene%2Cquery%3A%27%27%29%29"
+  },
+  {
+   "name": "multiqk",
+   "rule": {
+    "kibana_discover_app_url": "http://kibana:5601/#/discover",
+    "kibana_discover_index_pattern_id": "abc-1",
+    "opensearch_discover_app_url": "http://os:5601/app/data-explorer/discover#",
+    "opensearch_discover_index_pattern_id": "abc-1",
+    "timestamp_field": "@timestamp",
+    "query_key": "tags"
+   },
+   "match": {
+    "@timestamp": "2019-09-01T00:30:00Z",
+    "tags": [
+     "x",
+     "y"
+    ]
+   },
+   "kibana": "http://kibana:5601/#/discover?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28columns%3A%21%28_source%29%2Cfilters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Atags%2Cnegate%3A%21f%2Cparams%3A%28query%3A%21%28x%2Cy%29%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%27%5B%21%27x%21%27%2C%20%21%27y%21%27%5D%27%29%2Cquery%3A%28match%3A%28tags%3A%28query%3A%21%28x%2Cy%29%2Ctype%3Aphrase%29%29%29%29%29%2Cindex%3Aabc-1%2Cinterval%3Aauto%29",
+   "opensearch": "http://os:5601/app/data-explorer/discover#?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28discover%3A%28columns%3A%21%28_source%29%2CisDirty%3A%21f%2Csort%3A%21%28%29%29%2Cmetadata%3A%28indexPattern%3Aabc-1%2Cview%3Adiscover%29%29&_q=%28filters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Atags%2Cnegate%3A%21f%2Cparams%3A%28query%3A%21%28x%2Cy%29%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%27%5B%21%27x%21%27%2C%20%21%27y%21%27%5D%27%29%2Cquery%3A%28match%3A%28tags%3A%28query%3A%21%28x%2Cy%29%2Ctype%3Aphrase%29%29%29%29%29%2Cquery%3A%28language%3Alucene%2Cquery%3A%27%27%29%29"
+  },
+  {
+   "name": "emptyqk",
+   "rule": {
+    "kibana_discover_app_url": "http://kibana:5601/#/discover",
+    "kibana_discover_index_pattern_id": "abc-1",
+    "opensearch_discover_app_url": "http://os:5601/app/data-explorer/discover#",
+    "opensearch_discover_index_pattern_id": "abc-1",
+    "timestamp_field": "@timestamp",
+    "query_key": "tags"
+   },
+   "match": {
+    "@timestamp": "2019-09-01T00:30:00Z",
+    "tags": ""
+   },
+   "kibana": "http://kibana:5601/#/discover?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28columns%3A%21%28_source%29%2Cfilters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cexists%3A%28field%3Atags%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Atags%2Cnegate%3A%21t%2Ctype%3Aexists%2Cvalue%3Aexists%29%29%29%2Cindex%3Aabc-1%2Cinterval%3Aauto%29",
+   "opensearch": "http://os:5601/app/data-explorer/discover#?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28discover%3A%28columns%3A%21%28_source%29%2CisDirty%3A%21f%2Csort%3A%21%28%29%29%2Cmetadata%3A%28indexPattern%3Aabc-1%2Cview%3Adiscover%29%29&_q=%28filters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Atags%2Cnegate%3A%21f%2Cparams%3A%28query%3A%27%27%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%27%27%29%2Cquery%3A%28match%3A%28tags%3A%28query%3A%27%27%2Ctype%3Aphrase%29%29%29%29%29%2Cquery%3A%28language%3Alucene%2Cquery%3A%27%27%29%29"
+  },
+  {
+   "name": "float",
+   "rule": {
+    "kibana_discover_app_url": "http://kibana:5601/#/discover",
+    "kibana_discover_index_pattern_id": "abc-1",
+    "opensearch_discover_app_url": "http://os:5601/app/data-explorer/discover#",
+    "opensearch_discover_index_pattern_id": "abc-1",
+    "timestamp_field": "@timestamp",
+    "query_key": "v"
+   },
+   "match": {
+    "@timestamp": "2019-09-01T00:30:00Z",
+    "v": 1.5
+   },
+   "kibana": "http://kibana:5601/#/discover?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28columns%3A%21%28_source%29%2Cfilters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Av%2Cnegate%3A%21f%2Cparams%3A%28query%3A1.5%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%271.5%27%29%2Cquery%3A%28match%3A%28v%3A%28query%3A1.5%2Ctype%3Aphrase%29%29%29%29%29%2Cindex%3Aabc-1%2Cinterval%3Aauto%29",
+   "opensearch": "http://os:5601/app/data-explorer/discover#?_g=%28filters%3A%21%28%29%2CrefreshInterval%3A%28pause%3A%21t%2Cvalue%3A0%29%2Ctime%3A%28from%3A%272019-09-01T00%3A20%3A00Z%27%2Cto%3A%272019-09-01T00%3A40%3A00Z%27%29%29&_a=%28discover%3A%28columns%3A%21%28_source%29%2CisDirty%3A%21f%2Csort%3A%21%28%29%29%2Cmetadata%3A%28indexPattern%3Aabc-1%2Cview%3Adiscover%29%29&_q=%28filters%3A%21%28%28%27%24state%27%3A%28store%3AappState%29%2Cmeta%3A%28alias%3A%21n%2Cdisabled%3A%21f%2Cindex%3Aabc-1%2Ckey%3Av%2Cnegate%3A%21f%2Cparams%3A%28query%3A1.5%2Ctype%3Aphrase%29%2Ctype%3Aphrase%2Cvalue%3A%271.5%27%29%2Cquery%3A%28match%3A%28v%3A%28query%3A1.5%2Ctype%3Aphrase%29%29%29%29%29%2Cquery%3A%28language%3Alucene%2Cquery%3A%27%27%29%29"
+  }
+ ],
+ "formatters": [
+  {
+   "base": null,
+   "tenant": null,
+   "rel": "app/discover#/?_g=1",
+   "kibana": "app/discover#/?_g=1",
+   "opensearch": "app/discover#/?_g=1"
+  },
+  {
+   "base": null,
+   "tenant": "my tenant",
+   "rel": "app/discover#/?_g=1",
+   "kibana": "app/discover?security_tenant=my+tenant#/?_g=1",
+   "opensearch": "app/discover#/?_g=1"
+  },
+  {
+   "base": "http://kibana:5601",
+   "tenant": null,
+   "rel": "app/discover#/?_g=1",
+   "kibana": "http://kibana:5601/app/discover#/?_g=1",
+   "opensearch": "http://kibana:5601/app/discover#/?_g=1"
+  },
+  {
+   "base": "http://kibana:5601",
+   "tenant": "my tenant",
+   "rel": "app/discover#/?_g=1",
+   "kibana": "http://kibana:5601/app/discover?security_tenant=my+tenant#/?_g=1",
+   "opensearch": "http://kibana:5601/app/discover#/?_g=1"
+  },
+  {
+   "base": "https://h/kibana/",
+   "tenant": null,
+   "rel": "app/discover#/?_g=1",
+   "kibana": "https://h/kibana/app/discover#/?_g=1",
+   "opensearch": "https://h/kibana/app/discover#/?_g=1"
+  },
+  {
+   "base": "https://h/kibana/",
+   "tenant": "my tenant",
+   "rel": "app/discover#/?_g=1",
+   "kibana": "https://h/kibana/app/discover?security_tenant=my+tenant#/?_g=1",
+   "opensearch": "https://h/kibana/app/discover#/?_g=1"
+  },
+  {
+   "base": "http://k:5601/kibana",
+   "tenant": null,
+   "rel": "app/discover#/?_g=1",
+   "kibana": "http://k:5601/app/discover#/?_g=1",
+   "opensearch": "http://k:5601/app/discover#/?_g=1"
+  },
+  {
+   "base": "http://k:5601/kibana",
+   "tenant": "my tenant",
+   "rel": "app/discover#/?_g=1",
+   "kibana": "http://k:5601/app/discover?security_tenant=my+tenant#/?_g=1",
+   "opensearch": "http://k:5601/app/discover#/?_g=1"
+  },
+  {
+   "base": null,
+   "tenant": null,
+   "rel": "http://other/x#/?_g=2",
+   "kibana": "http://other/x#/?_g=2",
+   "opensearch": "http://other/x#/?_g=2"
+  },
+  {
+   "base": null,
+   "tenant": "my tenant",
+   "rel": "http://other/x#/?_g=2",
+   "kibana": "http://other/x?security_tenant=my+tenant#/?_g=2",
+   "opensearch": "http://other/x#/?_g=2"
+  },
+  {
+   "base": "http://kibana:5601",
+   "tenant": null,
+   "rel": "http://other/x#/?_g=2",
+   "kibana": "http://other/x#/?_g=2",
+   "opensearch": "http://other/x#/?_g=2"
+  },
+  {
+   "base": "http://kibana:5601",
+   "tenant": "my tenant",
+   "rel": "http://other/x#/?_g=2",
+   "kibana": "http://other/x?security_tenant=my+tenant#/?_g=2",
+   "opensearch": "http://other/x#/?_g=2"
+  },
+  {
+   "base": "https://h/kibana/",
+   "tenant": null,
+   "rel": "http://other/x#/?_g=2",
+   "kibana": "http://other/x#/?_g=2",
+   "opensearch": "http://other/x#/?_g=2"
+  },
+  {
+   "base": "https://h/kibana/",
+   "tenant": "my tenant",
+   "rel": "http://other/x#/?_g=2",
+   "kibana": "http://other/x?security_tenant=my+tenant#/?_g=2",
+   "opensearch": "http://other/x#/?_g=2"
+  },
+  {
+   "base": "http://k:5601/kibana",
+   "tenant": null,
+   "rel": "http://other/x#/?_g=2",
+   "kibana": "http://other/x#/?_g=2",
+   "opensearch": "http://other/x#/?_g=2"
+  },
+  {
+   "base": "http://k:5601/kibana",
+   "tenant": "my tenant",
+   "rel": "http://other/x#/?_g=2",
+   "kibana": "http://other/x?security_tenant=my+tenant#/?_g=2",
+   "opensearch": "http://other/x#/?_g=2"
+  }
+ ],
+ "tenant": [
+  {
+   "url": "http://a/b",
+   "tenant": "t",
+   "out": "http://a/b?security_tenant=t"
+  },
+  {
+   "url": "http://a/b",
+   "tenant": "a b/c",
+   "out": "http://a/b?security_tenant=a+b%2Fc"
+  },
+  {
+   "url": "http://a/b?x=1",
+   "tenant": "t",
+   "out": "http://a/b?x=1&security_tenant=t"
+  },
+  {
+   "url": "http://a/b?x=1",
+   "tenant": "a b/c",
+   "out": "http://a/b?x=1&security_tenant=a+b%2Fc"
+  },
+  {
+   "url": "http://a/b#/c?d=1",
+   "tenant": "t",
+   "out": "http://a/b?security_tenant=t#/c?d=1"
+  },
+  {
+   "url": "http://a/b#/c?d=1",
+   "tenant": "a b/c",
+   "out": "http://a/b?security_tenant=a+b%2Fc#/c?d=1"
+  },
+  {
+   "url": "http://a/b?x=1#/c",
+   "tenant": "t",
+   "out": "http://a/b?x=1&security_tenant=t#/c"
+  },
+  {
+   "url": "http://a/b?x=1#/c",
+   "tenant": "a b/c",
+   "out": "http://a/b?x=1&security_tenant=a+b%2Fc#/c"
+  },
+  {
+   "url": "/api/short_url",
+   "tenant": "t",
+   "out": "/api/short_url?security_tenant=t"
+  },
+  {
+   "url": "/api/short_url",
+   "tenant": "a b/c",
+   "out": "/api/short_url?security_tenant=a+b%2Fc"
+  }
+ ]
+}

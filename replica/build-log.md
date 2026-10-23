@@ -139,3 +139,14 @@ summary_table_type html, `_source_enabled: false`, SigV4, statsd, Kibana/OpenSea
 | `notify_email` | done | mails on rule panic (with location + backtrace, also stored in the error doc `traceback`), on rule files that fail to load, and with `notify_all_errors` on every logged error. Global + rule-level recipients, de-duplicated; SMTP options shared with the email alerter. Tested against the SMTP sink: panic mail to global + rule recipients, load-failure mail with the rule's own `notify_email`, notify_all_errors mail for an Elasticsearch 400 |
 | bug fixed on the way | done | a new rule file that fails to load was retried (and logged, and now mailed) on every reload tick; its hash is now remembered |
 | not done | | `notify_alert` |
+
+## Milestone 6 (2026-10-23)
+
+| area | status | notes |
+| --- | --- | --- |
+| `limit_execution`, `limit_execution_coverage` | done | upstream's rule: pause when `end + run_every < next cron time - 59 s`, never run a freshly loaded rule outside the window, with coverage resume at the window start. Checked live: rule outside the window logs `Pausing ... until next run at ...` and never queries; rules inside keep running. Upstream does not run such rules at all in `--debug --start/--end` replays (the end is in the past); here replays ignore the option |
+| Kibana / OpenSearch Discover links | done | `discover.rs`: Rison encoder (python-prison), `urllib.quote`, `os.path.expandvars`, absolute and shortened Kibana URLs, security tenant. 7 cases generated with upstream's own functions are compared byte for byte (`tests/golden/discover.json`); the parity rule also matches. Slack attachments added |
+| EQL / ES\|QL | done | `querylang.rs`: request split (`filter` list), `hits.events` relabelled, ES\|QL rows to documents (`_source` column, nested columns, multi-fields skipped, SHA-256 ids as upstream). Rejected with count/terms/aggregation rules and `new_term` (their sub-queries cannot carry these filters). Found on the way: the PyPI 2.31.0 wheel predates `format_source`; the parity run uses the repository checkout |
+| `match_enhancements` | partial | only `TimeEnhancement`; `run_enhancements_first` implemented as upstream (failure keeps the match when run first, drops it when run late). Python classes cannot be loaded and are rejected |
+| `jinja_filters` | not possible | the option names Python classes. Empty list accepted, otherwise rejected |
+| parity | done | `tests/parity/rules-ql`: 203 alerts identical (ES 8.15.5); the 37 original rules still 931 identical. One known difference: `TimeEnhancement` + `frequency` (see README, differences) |

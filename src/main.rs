@@ -1,12 +1,15 @@
 mod alert;
 mod alerters;
 mod config;
+mod discover;
 mod engine;
+mod enhancements;
 mod es;
 mod field;
 mod index;
 mod metrics;
 mod notify;
+mod querylang;
 mod rule;
 mod setup;
 mod testrule;
@@ -239,8 +242,13 @@ async fn rule_task(
     }
     loop {
         let started = tokio::time::Instant::now();
-        let next = started + Duration::from_micros(st.rule.run_every.max(time::SECOND) as u64) + Duration::from_millis(pseudo_random(5_000));
-        {
+        let mut next = started + Duration::from_micros(st.rule.run_every.max(time::SECOND) as u64) + Duration::from_millis(pseudo_random(5_000));
+        let end = now() - st.rule.query_delay;
+        // `limit_execution`: outside the cron window the rule sleeps until the next one; a rule that has not run
+        // yet since it was loaded does not run at all in that case.
+        let pause = st.limit_check(end);
+        if pause.is_none() || st.has_run_once {
+            st.has_run_once = true;
             let _permit = sem.acquire().await;
             let end = now() - st.rule.query_delay;
             let outcome = std::panic::AssertUnwindSafe(st.run(&ctx, end, initial.take())).catch_unwind().await;
@@ -272,7 +280,10 @@ async fn rule_task(
             }
         }
         st.forget_old_hits();
-        if tokio::time::Instant::now() > started + Duration::from_micros(st.rule.run_every.max(time::SECOND) as u64) {
+        if let Some(until) = pause {
+            st.pause(until, ctx.ts_fmt.as_deref());
+            next = tokio::time::Instant::now() + Duration::from_micros((until - now()).max(0) as u64);
+        } else if tokio::time::Instant::now() > started + Duration::from_micros(st.rule.run_every.max(time::SECOND) as u64) {
             log::warn!("Rule {} took longer than its run_every to process", st.rule.name);
         }
         // Wait for the next run, sending aggregated alerts as soon as their time comes.

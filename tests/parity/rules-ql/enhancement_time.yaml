@@ -1,0 +1,11 @@
+name: enhanced_any
+type: any
+index: logs-parity
+filter:
+- term: {user.name: eve}
+- term: {event.outcome: failure}
+match_enhancements: [TimeEnhancement]
+alert: debug
+alert_text: "{0}"
+alert_text_args: ["@timestamp"]
+realert: {seconds: 0}
