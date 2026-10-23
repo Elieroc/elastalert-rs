@@ -1,0 +1,14 @@
+name: terms query
+type: frequency
+index: logs-parity
+num_events: 6
+timeframe:
+  minutes: 5
+use_terms_query: true
+query_key: host.keyword
+filter:
+- term:
+    event.outcome: failure
+realert:
+  minutes: 0
+alert: debug

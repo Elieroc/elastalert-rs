@@ -1,0 +1,15 @@
+name: count query
+type: frequency
+index: logs-parity
+num_events: 8
+timeframe:
+  minutes: 5
+use_count_query: true
+filter:
+- term:
+    event.outcome: failure
+- term:
+    user.name: eve
+realert:
+  minutes: 0
+alert: debug

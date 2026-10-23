@@ -26,6 +26,14 @@ pub enum TsType {
     UnixMs,
 }
 
+/// When an aggregated alert is sent after its first match.
+#[derive(Clone, Debug)]
+pub enum Aggregation {
+    Timespan(Dur),
+    Cron(String),
+}
+
+#[derive(Clone)]
 pub struct Rule {
     pub name: String,
     pub file: PathBuf,
@@ -53,6 +61,22 @@ pub struct Rule {
     /// True when only a projection is fetched and matches get their full document via `_mget`.
     pub enrich: bool,
     pub scan_entire_timeframe: bool,
+    pub aggregation: Option<Aggregation>,
+    pub aggregation_key: Option<String>,
+    pub compound_aggregation_key: Vec<String>,
+    pub use_count_query: bool,
+    pub use_terms_query: bool,
+    pub terms_size: u64,
+    /// Fields for the "top events" counts, with the keyword suffix already applied.
+    pub top_count_keys: Vec<String>,
+    pub top_count_number: u64,
+    /// Field set by the ingest pipeline; when present, queries use it instead of the event time.
+    pub ingest_field: Option<String>,
+    pub exponential_realert: Option<Dur>,
+    pub query_timezone: Option<chrono_tz::Tz>,
+    pub allow_degraded: bool,
+    pub include_fields: Option<Vec<String>>,
+    pub jinja_template: Option<String>,
     pub max_query_size: u64,
     pub max_scrolling_count: u64,
     pub alerts: Vec<String>,
@@ -191,12 +215,32 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         Some("cardinality") => Kind::Cardinality,
         other => bail!("rule type {other:?} is not supported yet"),
     };
-    for unsupported in ["aggregation", "use_count_query", "use_terms_query", "limit_execution", "query_timezone", "top_count_keys"] {
+    for unsupported in ["limit_execution"] {
         if raw.get(unsupported).is_some_and(|v| !matches!(v, Value::Bool(false) | Value::Null)) {
             bail!("option {unsupported} is not supported yet");
         }
     }
-    let aggregation = false;
+    let aggregation = match raw.get("aggregation") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(match v.get("schedule").and_then(Value::as_str) {
+            Some(cron) => {
+                cron.parse::<croner::Cron>().map_err(|e| anyhow::anyhow!("invalid aggregation schedule {cron:?}: {e}"))?;
+                Aggregation::Cron(cron.to_string())
+            }
+            None => Aggregation::Timespan(parse_duration_map(v).context("invalid time format for aggregation")?),
+        }),
+    };
+    if raw.get("summary_table_type").and_then(Value::as_str) == Some("html") {
+        bail!("summary_table_type html is not supported yet (ascii and markdown are)");
+    }
+    let use_count_query = raw.get("use_count_query").and_then(Value::as_bool).unwrap_or(false);
+    let use_terms_query = raw.get("use_terms_query").and_then(Value::as_bool).unwrap_or(false);
+    if use_count_query && !matches!(kind, Kind::Frequency | Kind::Spike | Kind::Flatline) {
+        bail!("use_count_query is only supported for frequency, spike and flatline rules");
+    }
+    if use_terms_query && !matches!(kind, Kind::Frequency | Kind::Spike | Kind::Flatline | Kind::NewTerm) {
+        bail!("use_terms_query is only supported for frequency, spike, flatline and new_term rules");
+    }
     let timestamp_type = match raw.get("timestamp_type").and_then(Value::as_str).unwrap_or("iso").trim().to_lowercase().as_str() {
         "iso" => TsType::Iso,
         "unix" => TsType::Unix,
@@ -269,6 +313,53 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         bail!("scan_entire_timeframe can only be used if there is a timeframe specified");
     }
 
+    let mut compound_aggregation_key = Vec::new();
+    let aggregation_key = match raw.get("aggregation_key").cloned() {
+        Some(Value::Array(list)) => {
+            let keys: Vec<String> = list.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            let joined = keys.join(",");
+            compound_aggregation_key = keys;
+            raw.insert("aggregation_key".into(), json!(joined));
+            Some(joined)
+        }
+        Some(Value::String(k)) => Some(k),
+        _ => None,
+    };
+    if use_terms_query && query_key.is_none() {
+        bail!("query_key must be specified with use_terms_query");
+    }
+    let suffix = raw.get("string_multi_field_name").and_then(Value::as_str).unwrap_or(".keyword").to_string();
+    let raw_count_keys = raw.get("raw_count_keys").and_then(Value::as_bool).unwrap_or(true);
+    let top_count_keys: Vec<String> = raw
+        .get("top_count_keys")
+        .map(str_list)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|k| if raw_count_keys && !k.ends_with(&suffix) { format!("{k}{suffix}") } else { k })
+        .collect();
+    let top_count_number = raw.get("top_count_number").and_then(Value::as_u64).unwrap_or(5);
+    let ingest_field = raw.get("ingest_timestamp_field").and_then(Value::as_str).map(String::from);
+    let exponential_realert = dur_opt(&raw, "exponential_realert")?;
+    let query_timezone = match raw.get("query_timezone").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+        Some(t) => Some(t.parse::<chrono_tz::Tz>().map_err(|_| anyhow::anyhow!("unknown query_timezone {t:?}"))?),
+        None => None,
+    };
+    let include_fields = match raw.get("include_fields") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(a.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
+        Some(_) => bail!("include_fields option must be a list"),
+    };
+    let jinja_template = if raw.get("alert_text_type").and_then(Value::as_str) == Some("alert_text_jinja") {
+        let src = match raw.get("jinja_template_path").and_then(Value::as_str) {
+            Some(p) => std::fs::read_to_string(p).with_context(|| format!("reading jinja_template_path {p}"))?,
+            None => raw.get("alert_text").and_then(Value::as_str).unwrap_or("").to_string(),
+        };
+        crate::alert::check_jinja(&src).map_err(|e| anyhow::anyhow!("invalid jinja template: {e}"))?;
+        Some(src)
+    } else {
+        None
+    };
+
     // What to ask ES for. Types that treat every hit as a match need whole documents; the others
     // fetch only the fields they use and get the full document for matches later (`_mget`).
     let user_include = raw.get("include").map(str_list);
@@ -283,6 +374,8 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     include.extend(query_key.clone());
     include.extend(compound_query_key.iter().cloned());
     include.extend(compare_key.iter().cloned());
+    include.extend(compound_aggregation_key.iter().cloned());
+    include.extend(aggregation_key.clone());
     include.push(timestamp_field.clone());
     if !full {
         include.extend(raw.get("cardinality_field").and_then(Value::as_str).map(String::from));
@@ -322,7 +415,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     };
 
     Ok(Rule {
-        realert: dur_opt(&raw, "realert")?.unwrap_or(if aggregation { 0 } else { MINUTE }),
+        realert: dur_opt(&raw, "realert")?.unwrap_or(if aggregation.is_some() { 0 } else { MINUTE }),
         realert_key: raw.get("realert_key").and_then(Value::as_str).unwrap_or(&name).to_string(),
         buffer_time: dur_opt(&raw, "buffer_time")?.unwrap_or(conf.buffer_time),
         run_every: dur_opt(&raw, "run_every")?.unwrap_or(conf.run_every),
@@ -330,6 +423,20 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         use_local_time: raw.get("use_local_time").and_then(Value::as_bool).unwrap_or(true),
         file: file.to_path_buf(),
         compare_key,
+        aggregation,
+        aggregation_key,
+        compound_aggregation_key,
+        use_count_query,
+        use_terms_query,
+        terms_size: raw.get("terms_size").and_then(Value::as_u64).unwrap_or(50),
+        top_count_keys,
+        top_count_number,
+        ingest_field,
+        exponential_realert,
+        query_timezone,
+        allow_degraded: raw.get("allow_queries_on_degraded_indices").and_then(Value::as_bool).unwrap_or(false),
+        include_fields,
+        jinja_template,
         use_strftime_index: raw.get("use_strftime_index").and_then(Value::as_bool).unwrap_or(false),
         search_extra_index: raw.get("search_extra_index").and_then(Value::as_bool).unwrap_or(false),
         enrich,

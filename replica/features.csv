@@ -3,7 +3,7 @@ Load global config.yaml (required: run_every es_host es_port writeback_index buf
 Env var overrides (ES_HOST ES_PORT ES_USERNAME ES_PASSWORD ES_API_KEY ES_BEARER ES_USE_SSL ES_URL_PREFIX ES_HOSTS),config,must,yes,yes,
 Env var expansion inside YAML ($VAR / ${VAR}),config,must,yes,yes,original uses os.path.expandvars on raw text before parse
 "ES connection: host/hosts, TLS (verify_certs ca_certs client_cert client_key), basic / bearer / api key auth, url prefix, conn timeout",es client,must,yes,partial,"es_hosts failover coded+tested; TLS / client cert / CA coded, untested"
-ES/OpenSearch compat 7.x 8.x and OpenSearch,es client,must,yes,partial,tested on ES 8.15 only; 7.x and OpenSearch untested
+ES/OpenSearch compat 7.x 8.x and OpenSearch,es client,must,yes,yes,"tested: Elasticsearch 7.17.24 and 8.15.3, OpenSearch 2.17.1 (replay parity, create-index, resume, enrich); scroll on OpenSearch, PIT on ES >= 7.12"
 AWS SigV4 signing for OpenSearch Service,es client,could,yes,no,aws_region / profile
 Load rules from rules_folder (string or list),rule loading,must,yes,yes,
 scan_subdirectories (default true) follow symlinks skip ..dirs,rule loading,should,yes,yes,k8s configmap dirs
@@ -20,15 +20,15 @@ Hot reload by file-hash change (incl. imports); add/remove/reload without restar
 Compound query_key / aggregation_key / compare_key lists -> comma-joined,rule loading,must,yes,yes,query_key; compare_key joined like upstream
 Timestamp types iso / unix / unix_ms,query,must,yes,partial,"iso tested; unix/unix_ms coded, untested"
 Timestamp type custom (timestamp_format + *_expr),query,skip,yes,no,original uses Python eval(); do not clone
-query_timezone,query,should,yes,no,
+query_timezone,query,should,yes,yes,parity-tested (Europe/Paris)
 Query: filter list (ES Query DSL) + range (gt start lte end) on timestamp_field + sort asc,query,must,yes,yes,legacy {query: ...} wrapper unwrapped; parity-tested
-include / include_fields / _source_enabled (stored_fields),query,should,yes,partial,include + automatic projection with _mget for matches (W2); include_fields not done
+include / include_fields / _source_enabled (stored_fields),query,should,yes,yes,include + automatic projection with _mget (W2); include_fields parity-tested; _source_enabled false (stored_fields) not supported
 use_strftime_index (hourly/daily wildcard index expansion) + search_extra_index,query,must,yes,yes,search_extra_index too; parity-tested
-Scroll through hits beyond max_query_size; max_scrolling_count; scroll_keepalive,query,must,yes,yes,iterative scroll; PIT later
+Scroll through hits beyond max_query_size; max_scrolling_count; scroll_keepalive,query,must,yes,yes,"point in time + search_after on ES >= 7.12 (no page cap, no scroll context), scroll fallback (OpenSearch, older ES)"
 Dedup already-seen events across overlapping windows (processed_hits),query,must,yes,yes,remove_old_events GC; u64 id hash
-Shard failure handling / allow_queries_on_degraded_indices,query,should,yes,partial,fails the run; allow_queries_on_degraded_indices not yet
-use_count_query,query,should,yes,no,
-use_terms_query (+terms_size),query,should,yes,no,
+Shard failure handling / allow_queries_on_degraded_indices,query,should,yes,partial,strict mode and allow_queries_on_degraded_indices coded; not exercised against a real degraded cluster
+use_count_query,query,should,yes,yes,"frequency, spike, flatline; parity-tested"
+use_terms_query (+terms_size),query,should,yes,yes,"frequency, spike, flatline, new_term; parity-tested (frequency)"
 Aggregation queries (metric / bucket_interval / sync_bucket_interval / allow_buffer_time_overlap / use_run_every_query_size),query,should,yes,no,needed by metric_aggregation percentage_match spike_aggregation
 query_delay,query,should,yes,yes,
 scan_entire_timeframe,query,should,yes,yes,
@@ -42,7 +42,7 @@ limit_execution (cron) + limit_execution_coverage,scheduler,could,yes,no,
 --silence unit=n [--silence_qk_value],cli,must,yes,yes,
 SIGINT clean exit,cli,must,yes,yes,graceful: finish runs + flush writeback (SIGTERM too)
 rule type any,rule type,must,yes,yes,parity-tested
-rule type frequency (num_events timeframe query_key attach_related use_count_query use_terms_query),rule type,must,yes,partial,no use_count_query/use_terms_query; parity-tested otherwise
+rule type frequency (num_events timeframe query_key attach_related use_count_query use_terms_query),rule type,must,yes,yes,all options incl. count/terms queries; parity-tested
 rule type spike (spike_height spike_type up/down/both threshold_ref threshold_cur alert_on_new_data field_value),rule type,must,yes,yes,count and field_value modes; parity-tested
 rule type flatline (threshold timeframe forget_keys),rule type,must,yes,yes,parity-tested
 rule type blacklist (+ !file lists),rule type,must,yes,yes,parity-tested
@@ -55,19 +55,19 @@ rule type percentage_match,rule type,could,yes,no,
 rule type spike_aggregation,rule type,could,yes,yes,count and field_value modes; parity-tested
 EventWindow data structure (sorted by ts; running_count; onRemoved),rule type,must,yes,yes,
 Match flow: realert silence by realert_key[.qk] cache then ES check,alerting,must,yes,yes,memory + preload at start + refresh every run_every (so --silence from the CLI reaches a running daemon); no exponential_realert
-exponential_realert,alerting,should,yes,no,
-Aggregation: aggregation timespan or cron schedule; aggregation_key; aggregate_by_match_time; summary_table_fields (ascii/markdown/html),alerting,should,yes,no,pending matches persisted in writeback
+exponential_realert,alerting,should,yes,yes,unit-tested against upstream outputs
+Aggregation: aggregation timespan or cron schedule; aggregation_key; aggregate_by_match_time; summary_table_fields (ascii/markdown/html),alerting,should,yes,yes,"timespan and cron schedule, aggregation_key (compound too), aggregate_by_match_time, summary table ascii + markdown (byte-identical to upstream), persisted in ES and recovered at startup; summary_table_type html not supported"
 Pending-alert recovery after restart and retry of failed alerts (alert_time_limit),alerting,must,yes,yes,per-alerter retry with backoff (W10); recovered from ES at startup; tested
-top_count_keys / top_count_number,alerting,should,yes,no,
+top_count_keys / top_count_number,alerting,should,yes,yes,parity-tested; mock data supported in test-rule
 include_rule_params_in_matches,alerting,could,yes,no,
 Match enhancements (custom Python modules) + DropMatchException,alerting,skip,yes,no,Python plugin API; replace with a Rust trait or drop
 Custom Python rule/alerter modules via get_module,alerting,skip,yes,no,not portable to Rust
 alert_text / alert_text_args / alert_text_kw / alert_text_type / alert_subject(_args) / alert_missing_value,alert text,must,yes,partial,"alert_text args/kw, alert_subject(_args), alert_missing_value; no jinja; format specs ignored"
-Jinja alert text (alert_text_type alert_text_jinja jinja_template_path jinja_root_name jinja_filters),alert text,should,yes,no,minijinja; custom jinja_filters are Python modules -> skip
+Jinja alert text (alert_text_type alert_text_jinja jinja_template_path jinja_root_name jinja_filters),alert text,should,yes,yes,minijinja; alert_subject too; custom jinja_filters (Python modules) not supported
 Default match body text (rule name + get_match_str + sorted key: value),alert text,must,yes,yes,exact format matters for downstream parsers; parity-tested 81/81
 $rule_field$ references in alerter config,alerting,should,yes,yes,
 Alerter email (smtp host/port/ssl/starttls auth file cc bcc html images email_from_field),alerter,must,yes,partial,"smtp host/port/ssl/starttls/auth file, cc, bcc, html, reply-to, email_from_field; no images, no client cert"
-Alerter slack (webhook(s) attachments fields channel override proxy),alerter,must,yes,partial,"webhook(s), channels, attachment fields and styling; no discover/jira attachments, no summary table"
+Alerter slack (webhook(s) attachments fields channel override proxy),alerter,must,yes,partial,"webhook(s), channels, attachment fields and styling, aggregation summary in a code block; no discover/jira attachments"
 Alerter post / http_post (payload map static payload headers proxy ca),alerter,must,yes,yes,"payload map, static payload, headers, proxy, CA, timeout"
 Alerter command (list or shell string; pipe_match_json; pipe_alert_text),alerter,must,yes,yes,"argv / shell string, field substitution, pipe_match_json, pipe_alert_text, fail_on_non_zero_exit"
 Alerter debug,alerter,must,yes,yes,
@@ -82,14 +82,17 @@ Writeback indices: elastalert elastalert_status elastalert_error silence past_el
 create_index CLI (elastalert-create-index),writeback,should,yes,yes,`elastalert create-index [--index --old-index --recreate]`; ES conn from config
 replace_dots_in_field_names,writeback,could,yes,no,
 Error handling: writeback error doc; disable_rules_on_error; notify_email / notify_alert / notify_all_errors,errors,must,yes,partial,error docs and logs; no notify_email / notify_alert / disable_rules_on_error
-test_rule CLI (--schema-only --days --start --end --data --alert --save-json --use-downloaded --max-query-size --count-only --formatted-output --stop-error),cli,should,yes,no,separate binary or subcommand
+test_rule CLI (--schema-only --days --start --end --data --alert --save-json --use-downloaded --max-query-size --count-only --formatted-output --stop-error),cli,should,yes,yes,"`elastalert test-rule`: schema-only, days/start/end, data, alert, save-json, use-downloaded, max-query-size, count-only, formatted-output, stop-error; output text not byte-identical to upstream"
 Kibana discover URL (generate_kibana_discover_url etc.),integration,could,yes,no,
 OpenSearch discover URL,integration,could,yes,no,
 EQL and ES|QL rule queries,query,could,yes,no,eql.py esql.py
-Prometheus metrics endpoint (--prometheus_port),observability,should,yes,no,
+Prometheus metrics endpoint (--prometheus_port),observability,should,yes,yes,`--prometheus_port/--prometheus_addr`; same metric names (_total suffix)
 statsd metrics (rule.time_taken query.hits already_seen.hits query.matches query.alerts_sent),observability,could,yes,no,
 Logging config (dictConfig) -> tracing,observability,should,yes,no,
 Docker image + Helm chart,packaging,could,yes,no,
 Existing rules/*.yaml from SOC run unchanged,compat,must,yes,partial,"12 rule types supported minus metric/percentage/spike_aggregation; aggregation, count/terms queries, top_count_keys rejected with a clear error"
 Their docs site and community,project,skip,yes,skip,not part of the product; keep license notice and credit upstream
 Python plugin ecosystem (third-party rule/alerter modules),project,skip,yes,skip,
+"ingest_timestamp_field: query by ingest time, no buffer_time overlap (new, W3)",performance,should,no,yes,"verified: late document (old event time, new ingest time) found once in the next window"
+`elastalert validate`: load config + all rules + alerter options without ES (new),cli,should,no,yes,500 rules in 0.02 s
+"Point in time + search_after paging (new, W4)",performance,should,no,yes,replaces recursive scroll; falls back to scroll

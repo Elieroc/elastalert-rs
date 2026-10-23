@@ -1,0 +1,10 @@
+PRE
+Aggregation resulted in the following data for summary_table_fields ==> ['host', 'user.name', 'count']:
+
+| host | user.name | count |
+|-----|-----|-----|
+| web-1 | eve | 6 |
+| db-1 | eve | 2 |
+
+Showing top 2 rows
+SUF

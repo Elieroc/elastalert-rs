@@ -9,8 +9,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+/// What the cluster is, read once from `GET /`.
+pub struct Caps {
+    pub major: u32,
+    pub minor: u32,
+    pub opensearch: bool,
+}
+
 #[derive(Clone)]
 pub struct Es {
+    caps: Arc<tokio::sync::OnceCell<Caps>>,
     http: reqwest::Client,
     bases: Arc<Vec<String>>,
     current: Arc<AtomicUsize>,
@@ -105,7 +113,7 @@ impl Es {
             }
             b = b.identity(reqwest::Identity::from_pem(&pem)?);
         }
-        Ok(Es { http: b.build()?, bases: Arc::new(bases), current: Arc::new(AtomicUsize::new(0)) })
+        Ok(Es { caps: Arc::new(tokio::sync::OnceCell::new()), http: b.build()?, bases: Arc::new(bases), current: Arc::new(AtomicUsize::new(0)) })
     }
 
     /// Sends a request, trying every host once on connection-level failures.
@@ -163,10 +171,37 @@ impl Es {
         }
     }
 
-    /// Major version of the cluster (7, 8, ...), 2 for OpenSearch 2.x.
-    pub async fn major_version(&self) -> Result<u32> {
-        let info = self.get("").await?;
-        info["version"]["number"].as_str().and_then(|v| v.split('.').next()?.parse().ok()).context("cannot read ES version")
+    pub async fn caps(&self) -> Result<&Caps> {
+        self.caps
+            .get_or_try_init(|| async {
+                let info = self.get("").await?;
+                let v: Vec<u32> = info["version"]["number"].as_str().context("cannot read ES version")?.split('.').map_while(|p| p.parse().ok()).collect();
+                Ok(Caps { major: v.first().copied().unwrap_or(0), minor: v.get(1).copied().unwrap_or(0), opensearch: info["version"]["distribution"] == json!("opensearch") })
+            })
+            .await
+    }
+
+    /// Point in time + `_shard_doc` tiebreaker need Elasticsearch 7.12+.
+    pub async fn supports_pit(&self) -> bool {
+        self.caps().await.is_ok_and(|c| !c.opensearch && (c.major > 7 || (c.major == 7 && c.minor >= 12)))
+    }
+
+    pub async fn pit_open(&self, index: &str, keepalive: &str) -> Result<String> {
+        let r = self.request(Method::POST, &format!("{index}/_pit?keep_alive={keepalive}&ignore_unavailable=true"), Body::None).await?;
+        r["id"].as_str().map(String::from).context("no PIT id in response")
+    }
+
+    pub async fn pit_search(&self, body: &Value) -> Result<Value> {
+        self.post("_search", body).await
+    }
+
+    pub async fn pit_close(&self, id: &str) {
+        let _ = self.request(Method::DELETE, "_pit", Body::Json(&json!({"id": id}))).await;
+    }
+
+    pub async fn count(&self, index: &str, body: &Value) -> Result<u64> {
+        let r = self.post(&format!("{index}/_count?ignore_unavailable=true"), body).await?;
+        r["count"].as_u64().context("no count in response")
     }
 
     /// First page of a search, opening a scroll context.

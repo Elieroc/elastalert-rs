@@ -81,7 +81,35 @@ fn env_value(conf_key: &str, val: String) -> Value {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Config> {
-        let Value::Object(mut raw) = read_yaml(path)? else { bail!("{} must be a YAML map", path.display()) };
+        let Value::Object(raw) = read_yaml(path)? else { bail!("{} must be a YAML map", path.display()) };
+        Self::from_raw(raw, path)
+    }
+
+    /// For `test-rule`: a missing config file or missing keys fall back to defaults.
+    pub fn load_with_defaults(path: &Path) -> Result<Config> {
+        let mut raw = match path.exists() {
+            true => match read_yaml(path)? {
+                Value::Object(m) => m,
+                _ => bail!("{} must be a YAML map", path.display()),
+            },
+            false => Map::new(),
+        };
+        for (k, v) in [
+            ("rules_folder", json!("rules")),
+            ("es_host", json!("localhost")),
+            ("es_port", json!(9200)),
+            ("writeback_index", json!("wb")),
+            ("alert_time_limit", json!({"hours": 24})),
+            ("old_query_limit", json!({"weeks": 1})),
+            ("run_every", json!({"minutes": 5})),
+            ("buffer_time", json!({"minutes": 45})),
+        ] {
+            raw.entry(k).or_insert(v);
+        }
+        Self::from_raw(raw, path)
+    }
+
+    fn from_raw(mut raw: Map<String, Value>, path: &Path) -> Result<Config> {
         for (env, key) in ENV_OVERRIDES {
             if let Ok(val) = std::env::var(env) {
                 raw.insert(key.into(), env_value(key, val));

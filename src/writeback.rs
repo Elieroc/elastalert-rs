@@ -24,15 +24,32 @@ pub enum Kind {
 pub struct Writeback {
     tx: Option<mpsc::Sender<(String, Option<String>, Value)>>,
     index: String,
+    /// test-rule: collect what would have been written instead of writing or logging it.
+    capture: Option<std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>>,
 }
+
+pub type Captured = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
 
 impl Writeback {
     /// `es = None` (debug mode) logs the docs instead of writing them.
     pub fn start(es: Option<Es>, index: String) -> (Writeback, Option<JoinHandle<()>>) {
-        let Some(es) = es else { return (Writeback { tx: None, index }, None) };
+        let Some(es) = es else { return (Writeback { tx: None, index, capture: None }, None) };
         let (tx, rx) = mpsc::channel(10_000);
         let handle = tokio::spawn(run(es, rx));
-        (Writeback { tx: Some(tx), index }, Some(handle))
+        (Writeback { tx: Some(tx), index, capture: None }, Some(handle))
+    }
+
+    /// Writeback that records docs in memory (`(index, doc)`), for `test-rule`.
+    pub fn capturing(index: String) -> (Writeback, Captured) {
+        let c: Captured = Default::default();
+        (Writeback { tx: None, index, capture: Some(c.clone()) }, c)
+    }
+
+    /// Deletes the doc with this `_id` (used for the children of a sent aggregated alert).
+    pub async fn delete_id(&self, kind: Kind, id: &str) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send((self.index_for(kind), Some(id.to_string()), Value::Null)).await;
+        }
     }
 
     pub fn index_for(&self, kind: Kind) -> String {
@@ -61,6 +78,10 @@ impl Writeback {
 
     async fn send(&self, kind: Kind, id: Option<String>, mut doc: Map<String, Value>) {
         doc.entry("@timestamp").or_insert_with(|| json!(to_iso(now())));
+        if let Some(c) = &self.capture {
+            c.lock().unwrap().push((self.index_for(kind), Value::Object(doc)));
+            return;
+        }
         match &self.tx {
             None => log::info!("Skipping writing to ES: {}", Value::Object(doc)),
             Some(tx) => {
@@ -90,11 +111,11 @@ async fn run(es: Es, mut rx: mpsc::Receiver<(String, Option<String>, Value)>) {
             msg = rx.recv() => match msg {
                 Some((index, id, doc)) => {
                     // New docs use `create` so a retried bulk can't duplicate; explicit ids overwrite.
-                    let line = match id {
-                        Some(id) => json!({"index": {"_index": index, "_id": id}}),
-                        None => json!({"create": {"_index": index, "_id": uuid::Uuid::now_v7().to_string()}}),
-                    };
-                    buf.push(format!("{line}\n{doc}\n"));
+                    buf.push(match (id, doc.is_null()) {
+                        (Some(id), true) => format!("{}\n", json!({"delete": {"_index": index, "_id": id}})),
+                        (Some(id), false) => format!("{}\n{doc}\n", json!({"index": {"_index": index, "_id": id}})),
+                        (None, _) => format!("{}\n{doc}\n", json!({"create": {"_index": index, "_id": uuid::Uuid::now_v7().to_string()}})),
+                    });
                     if buf.len() < BATCH { continue }
                     true
                 }
@@ -108,7 +129,7 @@ async fn run(es: Es, mut rx: mpsc::Receiver<(String, Option<String>, Value)>) {
                 Ok(resp) => {
                     if resp["errors"] == json!(true) {
                         let first = resp["items"].as_array().and_then(|items| {
-                            items.iter().find_map(|i| i.as_object()?.values().next()?["error"].as_object().filter(|_| i.as_object().and_then(|o| o.values().next()).is_some_and(|v| v["status"] != json!(409))))
+                            items.iter().find_map(|i| i.as_object()?.values().next()?["error"].as_object().filter(|_| i.as_object().and_then(|o| o.values().next()).is_some_and(|v| v["status"] != json!(409) && v["status"] != json!(404))))
                         });
                         if let Some(e) = first {
                             log::error!("Error writing to writeback index: {}", Value::Object(e.clone()));

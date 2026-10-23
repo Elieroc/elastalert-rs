@@ -1,0 +1,12 @@
+name: bench rule 489
+type: frequency
+index: bench-fat
+num_events: 100000
+timeframe: {hours: 1}
+query_key: user.name
+filter:
+- term:
+    host.name.keyword: web-1
+alert_text: "rule 489: {} events"
+alert_text_args: [user.name]
+alert: debug

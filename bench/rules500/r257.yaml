@@ -1,0 +1,12 @@
+name: bench rule 257
+type: frequency
+index: bench-fat
+num_events: 100000
+timeframe: {hours: 1}
+query_key: user.name
+filter:
+- term:
+    host.name.keyword: web-3
+alert_text: "rule 257: {} events"
+alert_text_args: [user.name]
+alert: debug

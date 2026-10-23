@@ -1,0 +1,20 @@
+name: jinja text
+type: any
+index: logs-parity
+filter:
+- term:
+    user.name: eve
+- term:
+    event.outcome: failure
+- range:
+    "@timestamp":
+      lte: "2026-10-01T09:00:40Z"
+alert_text_type: alert_text_jinja
+alert_text: |
+  {{ user.name }} failed on {{ host }} ({{ event.duration }}s) of {{ _data.num_matches }}
+  {% for t in tags %}- {{ t }}
+  {% endfor %}
+alert_subject: "S {{ host }}"
+realert:
+  minutes: 0
+alert: debug

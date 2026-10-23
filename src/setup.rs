@@ -14,9 +14,9 @@ const MAPPINGS: [(&str, &str, &str); 5] = [
 
 /// Creates missing indices. With `recreate`, existing ones are deleted first (data loss).
 pub async fn create_index(es: &Es, index: &str, recreate: bool, old_index: Option<&str>) -> Result<()> {
-    let major = es.major_version().await?;
-    if major < 7 {
-        anyhow::bail!("unsupported Elasticsearch version {major}");
+    let caps = es.caps().await?;
+    if !caps.opensearch && caps.major < 7 {
+        anyhow::bail!("unsupported Elasticsearch version {}", caps.major);
     }
     if !recreate && es.exists(index).await? {
         println!("Index {index} already exists. Skipping index creation.");

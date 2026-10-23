@@ -5,8 +5,10 @@ mod engine;
 mod es;
 mod field;
 mod index;
+mod metrics;
 mod rule;
 mod setup;
+mod testrule;
 mod time;
 mod types;
 mod writeback;
@@ -15,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use config::Config;
 use engine::{Ctx, Pending, RuleState, Silences};
+use metrics::Metrics;
 use es::Es;
 use rustc_hash::FxHashMap;
 use serde_json::{Value, json};
@@ -63,6 +66,12 @@ struct Args {
     /// Do not reload rule files when they change
     #[arg(long = "pin_rules")]
     pin_rules: bool,
+    /// Serve Prometheus metrics on this port
+    #[arg(long = "prometheus_port")]
+    prometheus_port: Option<u16>,
+    /// Address to bind the Prometheus metrics server on
+    #[arg(long = "prometheus_addr", default_value = "0.0.0.0")]
+    prometheus_addr: String,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -81,13 +90,17 @@ enum Cmd {
         #[arg(long)]
         recreate: bool,
     },
+    /// Run one rule over past data without alerting, and show what it would do
+    TestRule(testrule::TestRuleArgs),
+    /// Load the config and every rule (including alerter options) and report errors; no Elasticsearch needed
+    Validate,
 }
 
-struct Logger(log::LevelFilter);
+struct Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, m: &log::Metadata) -> bool {
-        m.level() <= self.0
+        m.level() <= log::max_level()
     }
     fn log(&self, r: &log::Record) {
         if self.enabled(r.metadata()) {
@@ -140,7 +153,7 @@ async fn refresh_silences(ctx: &Ctx, index: &str) {
             for h in r["hits"]["hits"].as_array().into_iter().flatten() {
                 let s = &h["_source"];
                 if let (Some(name), Some(until)) = (s["rule_name"].as_str(), s["until"].as_str().and_then(parse_iso)) {
-                    ctx.silences.raise(name, until, s["exponent"].as_u64().unwrap_or(0) as u32);
+                    ctx.silences.raise(name, until, s["exponent"].as_i64().unwrap_or(0) as i32);
                 }
             }
         }
@@ -148,35 +161,57 @@ async fn refresh_silences(ctx: &Ctx, index: &str) {
     }
 }
 
-/// Alerts that were not fully sent before the last shutdown are queued again.
+/// Unsent alerts and aggregation groups left in ES by the previous run are put back in their rules.
 async fn recover_pending(ctx: &Ctx, index: &str, states: &mut [RuleState]) {
-    let body = json!({"query": {"bool": {
-        "filter": [{"term": {"alert_sent": false}}, {"range": {"alert_time": {"gte": to_iso(now() - ctx.alert_time_limit), "lte": to_iso(now())}}}],
-        "must_not": [{"exists": {"field": "aggregate_id"}}, {"exists": {"field": "aggregation_key"}}],
-    }}});
+    let body = json!({"query": {"bool": {"filter": [
+        {"term": {"alert_sent": false}},
+        {"range": {"alert_time": {"gte": to_iso(now() - ctx.alert_time_limit)}}},
+    ]}}});
     let hits = match ctx.es.scan(index, &body, "1m").await {
         Ok(h) => h,
         Err(e) => return log::warn!("Error finding recent pending alerts: {e:#}"),
     };
-    let mut recovered = 0;
-    for h in hits {
+    // Children of an aggregated alert point at the head's _id.
+    let mut children: FxHashMap<String, Vec<&Value>> = FxHashMap::default();
+    for h in &hits {
+        if let Some(head) = h["_source"]["aggregate_id"].as_str() {
+            children.entry(head.to_string()).or_default().push(h);
+        }
+    }
+    let (mut alerts, mut groups) = (0, 0);
+    for h in hits.iter().filter(|h| h["_source"]["aggregate_id"].is_null()) {
         let s = &h["_source"];
         let (Some(name), Some(body)) = (s["rule_name"].as_str(), s["match_body"].as_object()) else { continue };
         let Some(st) = states.iter_mut().find(|st| st.rule.name == name) else { continue };
-        let sent: Vec<&str> = s["alerters_sent"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-        st.pending.push(Pending {
-            id: h["_id"].as_str().unwrap_or_default().to_string(),
-            matches: vec![body.clone()],
-            done: st.rule.alerts.iter().map(|k| sent.contains(&k.as_str())).collect(),
-            attempts: s["retry_count"].as_u64().unwrap_or(0) as u32,
-            next_try: 0,
-            alert_time: s["alert_time"].as_str().and_then(parse_iso).unwrap_or_else(now),
-            exception: s["alert_exception"].as_str().unwrap_or_default().to_string(),
-        });
-        recovered += 1;
+        let id = h["_id"].as_str().unwrap_or_default().to_string();
+        let alert_time = s["alert_time"].as_str().and_then(parse_iso).unwrap_or_else(now);
+        let mut kids: Vec<&&Value> = children.get(&id).into_iter().flatten().collect();
+        kids.sort_by_key(|k| k["_source"]["@timestamp"].as_str().and_then(parse_iso));
+        let mut matches = vec![body.clone()];
+        matches.extend(kids.iter().filter_map(|k| k["_source"]["match_body"].as_object().cloned()));
+        let child_ids: Vec<String> = kids.iter().filter_map(|k| k["_id"].as_str().map(String::from)).collect();
+        if s.get("alerters_sent").is_some() {
+            // A send that failed part way: retry the alerters that did not get it.
+            let sent: Vec<&str> = s["alerters_sent"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            st.restore_pending(Pending {
+                id,
+                matches,
+                done: st.rule.alerts.iter().map(|k| sent.contains(&k.as_str())).collect(),
+                attempts: s["retry_count"].as_u64().unwrap_or(0) as u32,
+                next_try: 0,
+                alert_time,
+                exception: s["alert_exception"].as_str().unwrap_or_default().to_string(),
+                child_ids,
+            });
+            alerts += 1;
+        } else if st.rule.aggregation.is_some() {
+            // Never sent: an aggregation group still waiting for its time.
+            st.restore_group(s["aggregation_key"].as_str().unwrap_or_default().to_string(), id, alert_time, matches, child_ids);
+            groups += 1;
+        }
     }
-    if recovered > 0 {
-        log::info!("Recovered {recovered} unsent alert(s) from the writeback index");
+    if alerts + groups > 0 {
+        log::info!("Recovered {alerts} unsent alert(s) and {groups} aggregation group(s) from the writeback index");
     }
 }
 
@@ -194,22 +229,37 @@ async fn rule_task(
         _ = stop.changed() => return st,
     }
     loop {
-        let next = tokio::time::Instant::now() + Duration::from_micros(st.rule.run_every.max(time::SECOND) as u64);
+        let started = tokio::time::Instant::now();
+        let next = started + Duration::from_micros(st.rule.run_every.max(time::SECOND) as u64) + Duration::from_millis(pseudo_random(5_000));
         {
             let _permit = sem.acquire().await;
             let end = now() - st.rule.query_delay;
             if let Err(e) = st.run(&ctx, end, initial.take()).await {
+                ctx.metrics.error();
                 ctx.writeback.error(format!("Error running rule {}: {e:#}", st.rule.name), json!({"rule": st.rule.name})).await;
             }
         }
         st.forget_old_hits();
-        if tokio::time::Instant::now() > next {
+        if tokio::time::Instant::now() > started + Duration::from_micros(st.rule.run_every.max(time::SECOND) as u64) {
             log::warn!("Rule {} took longer than its run_every to process", st.rule.name);
         }
-        let jitter = Duration::from_millis(pseudo_random(5_000));
-        tokio::select! {
-            _ = tokio::time::sleep_until(next + jitter) => {}
-            _ = stop.changed() => return st,
+        // Wait for the next run, sending aggregated alerts as soon as their time comes.
+        loop {
+            st.flush_due(&ctx, false).await;
+            let wake = match st.next_agg_due() {
+                Some(t) => next.min(tokio::time::Instant::now() + Duration::from_micros((t - now()).max(0) as u64)),
+                None => next,
+            };
+            tokio::select! {
+                _ = tokio::time::sleep_until(wake) => {}
+                _ = stop.changed() => {
+                    // Shutting down or reloading: groups keep their ES docs and come back at startup.
+                    return st;
+                }
+            }
+            if tokio::time::Instant::now() >= next {
+                break;
+            }
         }
     }
 }
@@ -335,10 +385,17 @@ impl Runtime {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let level = if args.debug || args.verbose { log::LevelFilter::Info } else { log::LevelFilter::Warn };
-    log::set_logger(Box::leak(Box::new(Logger(level)))).expect("logger set once");
+    log::set_logger(Box::leak(Box::new(Logger))).expect("logger set once");
     log::set_max_level(level);
 
+    if let Some(Cmd::TestRule(t)) = args.cmd {
+        log::set_max_level(log::LevelFilter::Info);
+        return testrule::run(t, &args.config).await;
+    }
     let conf = Config::load(&args.config)?;
+    if let Some(Cmd::Validate) = &args.cmd {
+        return testrule::validate(&conf);
+    }
     let es = Es::from_conf(&conf.raw)?;
 
     if let Some(Cmd::CreateIndex { index, old_index, recreate }) = &args.cmd {
@@ -350,11 +407,18 @@ async fn main() -> Result<()> {
     }
 
     let rules = rule::load_all(&conf, args.rule.as_deref())?;
+    let metrics = Arc::new(Metrics::default());
+    if let (Some(port), false) = (args.prometheus_port, args.debug) {
+        metrics::serve(format!("{}:{port}", args.prometheus_addr), metrics.clone()).await?;
+    }
     let (wb, wb_handle) = Writeback::start((!args.debug).then(|| es.clone()), conf.writeback_index.clone());
     let ctx = Arc::new(Ctx {
         es: es.clone(),
         writeback: wb,
         silences: Arc::new(Silences::default()),
+        metrics: metrics.clone(),
+        run_every: conf.run_every,
+        use_pit: conf.raw.get("use_pit").and_then(Value::as_bool).unwrap_or(true),
         debug: args.debug,
         old_query_limit: conf.old_query_limit,
         alert_time_limit: conf.alert_time_limit,
@@ -399,6 +463,8 @@ async fn main() -> Result<()> {
                 if let Err(e) = st.run(&ctx, end, start).await {
                     ctx.writeback.error(format!("Error running rule {}: {e:#}", st.rule.name), json!({"rule": st.rule.name})).await;
                 }
+                // A replay ends here: aggregated alerts are sent now instead of waiting for their time.
+                st.flush_due(&ctx, true).await;
             });
         }
         while tasks.join_next().await.is_some() {}

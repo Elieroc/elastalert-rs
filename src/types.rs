@@ -185,6 +185,33 @@ impl RuleType {
         }
     }
 
+    /// Result of a count query: `count` documents up to `ts`.
+    pub fn add_count(&mut self, rule: &Rule, ts: Ts, count: i64, matches: &mut Vec<Doc>) {
+        let ev = || Event { ts, doc: Doc::from_iter([(rule.timestamp_field.clone(), json!(to_iso(ts)))]) };
+        match self {
+            RuleType::Frequency(f) => f.add_one(rule, ALL.into(), ev(), count, matches),
+            RuleType::Spike(s) => s.handle_event(rule, ev(), count, ALL.into(), matches),
+            RuleType::Flatline(f) => f.add_counted(rule, ALL.into(), ev(), count, matches),
+            _ => {}
+        }
+    }
+
+    /// Result of a terms query: one bucket per `query_key` value.
+    pub fn add_terms(&mut self, rule: &Rule, ts: Ts, buckets: &[(Value, i64)], matches: &mut Vec<Doc>) {
+        let Some(qk) = rule.query_key.clone() else { return };
+        for (key, count) in buckets {
+            let ev = Event { ts, doc: Doc::from_iter([(rule.timestamp_field.clone(), json!(to_iso(ts))), (qk.clone(), key.clone())]) };
+            let k = key.to_string();
+            match self {
+                RuleType::Frequency(f) => f.add_one(rule, k, ev, *count, matches),
+                RuleType::Spike(s) => s.handle_event(rule, ev, *count, k, matches),
+                RuleType::Flatline(f) => f.add_counted(rule, k, ev, *count, matches),
+                RuleType::NewTerm(n) => n.add_term_bucket(rule, ts, &qk, key, matches),
+                _ => {}
+            }
+        }
+    }
+
     /// Called with the end of each queried segment; drops stale state and may produce matches
     /// (flatline, spike placeholders, min_cardinality).
     pub fn garbage_collect(&mut self, rule: &Rule, ts: Ts, matches: &mut Vec<Doc>) {
@@ -290,18 +317,22 @@ impl Frequency {
     fn add_data(&mut self, rule: &Rule, events: Vec<Event>, matches: &mut Vec<Doc>) {
         for ev in events {
             let key = group_key(rule, &ev.doc);
-            let window = self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule)));
-            window.append(ev, 1);
-            if window.count() >= rule.num_events as i64 {
-                let mut w = self.occurrences.remove(&key).expect("window just used");
-                let (last, _) = w.data.pop_back().expect("non-empty window");
-                let mut m = into_match(rule, last);
-                if rule.attach_related {
-                    let related: Vec<Value> = w.data.into_iter().map(|(e, _)| Value::Object(into_match(rule, e))).collect();
-                    m.insert("related_events".into(), Value::Array(related));
-                }
-                matches.push(m);
+            self.add_one(rule, key, ev, 1, matches);
+        }
+    }
+
+    fn add_one(&mut self, rule: &Rule, key: String, ev: Event, count: i64, matches: &mut Vec<Doc>) {
+        let window = self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule)));
+        window.append(ev, count);
+        if window.count() >= rule.num_events as i64 {
+            let mut w = self.occurrences.remove(&key).expect("window just used");
+            let (last, _) = w.data.pop_back().expect("non-empty window");
+            let mut m = into_match(rule, last);
+            if rule.attach_related {
+                let related: Vec<Value> = w.data.into_iter().map(|(e, _)| Value::Object(into_match(rule, e))).collect();
+                m.insert("related_events".into(), Value::Array(related));
             }
+            matches.push(m);
         }
     }
 }
@@ -317,6 +348,11 @@ pub struct Flatline {
 impl Flatline {
     fn new(rule: &Rule) -> Self {
         Flatline { occurrences: FxHashMap::default(), first_event: FxHashMap::default(), threshold: rule.raw.get("threshold").cloned().unwrap_or(json!(0)) }
+    }
+
+    fn add_counted(&mut self, rule: &Rule, key: String, ev: Event, count: i64, matches: &mut Vec<Doc>) {
+        self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule))).append(ev, count);
+        self.check(rule, &key, matches);
     }
 
     fn add_data(&mut self, rule: &Rule, events: Vec<Event>, matches: &mut Vec<Doc>) {
@@ -445,7 +481,7 @@ impl Spike {
         }
     }
 
-    fn handle_event(&mut self, rule: &Rule, ev: Event, count: i64, qk: String, matches: &mut Vec<Doc>) {
+    pub fn handle_event(&mut self, rule: &Rule, ev: Event, count: i64, qk: String, matches: &mut Vec<Doc>) {
         let timeframe = tf(rule);
         let ev_ts = ev.ts;
         self.first_event.entry(qk.clone()).or_insert(ev_ts);
@@ -689,6 +725,17 @@ impl NewTerm {
         }
         self.ready = true;
         Ok(())
+    }
+
+    /// `use_terms_query`: each bucket key not seen before is a new term.
+    fn add_term_bucket(&mut self, rule: &Rule, ts: Ts, qk: &str, key: &Value, matches: &mut Vec<Doc>) {
+        let k = key.to_string();
+        if !self.seen[0].contains(&k) {
+            let mut m = Doc::from_iter([(qk.to_string(), key.clone()), (rule.timestamp_field.clone(), ts_value(rule, ts))]);
+            m.insert("new_field".into(), json!(self.fields[0][0]));
+            matches.push(m);
+            self.seen[0].insert(k);
+        }
     }
 
     fn add_data(&mut self, rule: &Rule, events: Vec<Event>, matches: &mut Vec<Doc>) {

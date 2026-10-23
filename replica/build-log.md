@@ -83,3 +83,39 @@ using `bench/config-{rs,py}.yaml` and compare `bench_{rs,py}_status` and the `be
 - `ChangeRule` state is per rule instance (upstream shares one dict between all change rules).
 - new_term startup loads terms with one composite aggregation over the whole window instead of one terms agg per day (`window_step_size` ignored).
 - Log lines of an alert body are emitted in one call so parallel rules can't interleave them.
+
+## Milestone 3 (2026-10-23)
+
+| area | status | notes |
+| --- | --- | --- |
+| aggregation | done | `aggregation` (timespan or cron), `aggregation_key` (compound too), `aggregate_by_match_time`, summary table (ascii, markdown). Groups are persisted as pending docs (head + children via `aggregate_id`), recovered at startup, sent by a timer at the group's time (no polling), children deleted once fully sent. Replay (`--end`) sends open groups at the end. Summary tables byte-identical to Python on 3 golden cases (`tests/golden`); grouping identical on 12 alerts |
+| exponential_realert | done | unit test against values printed by upstream's `next_alert_time` |
+| count / terms queries | done | frequency, spike, flatline (+ new_term terms); segmented by the global `run_every` like upstream; parity-tested |
+| top_count_keys | done | parity-tested; also with `test-rule --data` |
+| jinja | done | minijinja, `alert_text_jinja`, `jinja_template_path`, subject. Python-module jinja filters not supported |
+| `test-rule` | done | all upstream flags except `--max-query-size` semantics are approximate; works against ES or `--data` / `--save-json` / `--use-downloaded` |
+| `validate` | done | new command; 500 rules in 0.02 s |
+| Prometheus | done | `--prometheus_port`, same metric names |
+| PIT + search_after | done | ES >= 7.12; scroll fallback (OpenSearch tested) |
+| ingest_timestamp_field | done | opt-in; verified that a late document is found once and nothing is re-read |
+| query_timezone, include_fields, degraded indices | done | first two parity-tested; degraded policy untested on a real degraded cluster |
+| ES 7.17 / OpenSearch 2.17 | tested | replay of the 22-rule set gives the same alerts as ES 8 (7.17 adds `_type: _doc` to matches, as upstream does); create-index, resume, enrichment, new_term, silence work on OpenSearch |
+
+### Parity at the end of milestone 3
+
+23 rules, 730 alerts, identical to Python ElastAlert 2.31.0 (`tests/parity`, `diff.py py.log rs.log`). Rule types: any, frequency (hits, count, terms), spike (count, field_value, count query),
+flatline (hits, count), blacklist, whitelist, change, new_term (composite), cardinality (max, min); strftime index, aggregation, top counts, jinja, query_timezone, include_fields, alert_text args/kw, subject args.
+
+### Footprint (500 rules)
+
+| | Python | elastalert-rs |
+| --- | --- | --- |
+| load + validate 500 rules | not measured | 0.02 s, 16 MB |
+| RSS, daemon with 500 rules, 35 s after start | 94 MB (still starting rules) | 30 MB (all 500 had run once) |
+
+Python's figure is a snapshot while it was still running its first rules; treat it as indicative only.
+
+### Not done
+
+metric_aggregation, percentage_match, spike_aggregation (aggregation queries), `limit_execution`, `notify_email` / `notify_alert` / `disable_rules_on_error`, `--es_debug(_trace)`,
+summary_table_type html, `_source_enabled: false`, SigV4, statsd, Kibana/OpenSearch discover links, the other ~40 alerters, TLS/client-cert paths (still untested), HA lease.

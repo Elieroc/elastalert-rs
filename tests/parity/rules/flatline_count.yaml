@@ -1,0 +1,15 @@
+name: flatline count
+type: flatline
+index: logs-parity
+timeframe:
+  minutes: 5
+threshold: 4
+use_count_query: true
+filter:
+- term:
+    user.name: eve
+- term:
+    event.outcome: failure
+realert:
+  minutes: 0
+alert: debug

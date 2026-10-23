@@ -1,0 +1,16 @@
+name: timezone and fields
+type: any
+index: logs-parity
+query_timezone: Europe/Paris
+include_fields: ["user.name"]
+filter:
+- term:
+    user.name: eve
+- term:
+    event.outcome: failure
+- range:
+    "@timestamp":
+      lte: "2026-10-01T09:01:00Z"
+realert:
+  minutes: 0
+alert: debug

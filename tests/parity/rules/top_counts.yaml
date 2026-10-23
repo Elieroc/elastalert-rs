@@ -1,0 +1,15 @@
+name: with top counts
+type: frequency
+index: logs-parity
+num_events: 5
+timeframe:
+  minutes: 2
+query_key: user.name
+filter:
+- term:
+    event.outcome: failure
+top_count_keys: [host, event.outcome]
+top_count_number: 3
+realert:
+  minutes: 0
+alert: debug

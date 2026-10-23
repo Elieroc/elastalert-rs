@@ -1,5 +1,5 @@
 """Compares the alerts two `--debug` logs contain (order-insensitive).
-Usage: python3 diff.py py.log rs.log"""
+Usage: python3 diff.py py.log rs.log [skip-text]"""
 import difflib, re, sys
 
 def alerts(path):
@@ -17,7 +17,8 @@ def alerts(path):
             out.append(''.join(r) + ''.join(records[i + 1]).rstrip('\n') + '\n')
     return sorted(out)
 
-a, b = alerts(sys.argv[1]), alerts(sys.argv[2])
+skip = sys.argv[3] if len(sys.argv) > 3 else None  # optional: ignore alerts whose text contains this
+a, b = (list(filter(lambda x: not skip or skip not in x, alerts(f))) for f in sys.argv[1:3])
 print(f'{sys.argv[1]}: {len(a)} alerts, {sys.argv[2]}: {len(b)} alerts')
 diff = list(difflib.unified_diff(''.join(a).splitlines(), ''.join(b).splitlines(), sys.argv[1], sys.argv[2], lineterm='', n=2))
 print('\n'.join(diff[:200]) if diff else 'IDENTICAL')

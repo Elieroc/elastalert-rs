@@ -1,0 +1,14 @@
+name: spike count query
+type: spike
+index: logs-parity
+timeframe:
+  minutes: 10
+spike_height: 2
+spike_type: up
+use_count_query: true
+filter:
+- term:
+    event.outcome: failure
+realert:
+  minutes: 0
+alert: debug

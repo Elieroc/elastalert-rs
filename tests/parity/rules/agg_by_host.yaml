@@ -1,0 +1,17 @@
+name: aggregated by host
+type: frequency
+index: logs-parity
+num_events: 3
+timeframe:
+  minutes: 1
+query_key: user.name
+filter:
+- term:
+    event.outcome: failure
+- term:
+    user.name: eve
+aggregation:
+  seconds: 2
+aggregation_key: host
+summary_table_fields: [host, user.name]
+alert: debug

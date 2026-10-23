@@ -83,6 +83,15 @@ pub fn to_iso(ts: Ts) -> String {
     }
 }
 
+/// ISO text with the offset of `tz` (Python `isoformat()` of an aware datetime): fraction only when non-zero.
+pub fn to_iso_in(ts: Ts, tz: &chrono_tz::Tz) -> String {
+    let dt = utc(ts).with_timezone(tz);
+    let us = ts.rem_euclid(SECOND);
+    let base = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let off = dt.format("%:z").to_string();
+    if us == 0 { format!("{base}{off}") } else { format!("{base}.{us:06}{off}") }
+}
+
 fn local_tz() -> chrono_tz::Tz {
     static TZ: OnceLock<chrono_tz::Tz> = OnceLock::new();
     *TZ.get_or_init(|| {

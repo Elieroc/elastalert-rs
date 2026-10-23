@@ -1,6 +1,6 @@
 //! Alerters: debug, email, slack, http post, command. Each is built once per rule from its keys.
 
-use crate::alert::{self, create_alert_body, create_title};
+use crate::alert::{self, create_alert_body, create_alert_body_with, create_title};
 use crate::field::{lookup, py_str};
 use crate::rule::Rule;
 use crate::types::RuleType;
@@ -349,7 +349,7 @@ impl Slack {
 
     async fn alert(&self, v: &View<'_>, matches: &[Doc]) -> Result<()> {
         let o = |k: &str| self.rule_opts[k].as_str().unwrap_or("").to_string();
-        let body = create_alert_body(v.rule, v.rtype, matches, v.ts_fmt);
+        let body = create_alert_body_with(v.rule, v.rtype, matches, v.ts_fmt, 75, true);
         let mut att = json!({
             "color": o("slack_msg_color"),
             "title": create_title(v.rule, matches, || v.rule.name.clone()),
