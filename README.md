@@ -372,7 +372,7 @@ src/types.rs       rule types and EventWindow
 src/rule.rs        rule loading, imports, validation, defaults
 src/config.rs      config.yaml, environment overrides
 src/es.rs          Elasticsearch / OpenSearch REST client (PIT, scroll, bulk, mget, request tracing)
-src/alerters.rs    email, slack, post, command
+src/alerters/     one module per alerter (email, slack, post, command), shared HTTP client in http.rs
 src/alert.rs       alert text (match body, subject, summary tables, jinja)
 src/discover.rs    Kibana / OpenSearch Discover links (Rison, URL formatters, Kibana short URLs)
 src/querylang.rs   EQL / ES|QL request and response conversion

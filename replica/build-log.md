@@ -156,3 +156,9 @@ summary_table_type html, `_source_enabled: false`, SigV4, statsd, Kibana/OpenSea
 | area | status | notes |
 | --- | --- | --- |
 | native match enhancements | done | `Enhancement` trait (`process(&mut Doc) -> Result<Outcome>`, `Outcome::Drop` = `DropMatchException`) and a name -> constructor registry; options validated at load. Entries are names or one-key maps. Modules: `TimeEnhancement`, `rust.add_field`, `rust.drop_if`, `rust.lookup`. Drop semantics as upstream: late run removes the match (empty aggregation group sends nothing), `run_enhancements_first` skips it after the silence is set. Checked with `test-rule --data --alert`. Guide: `docs/enhancements.md` |
+
+## Milestone 8: alerters (in progress)
+
+| area | status | notes |
+| --- | --- | --- |
+| L0 groundwork | done | `src/alerters.rs` split into `src/alerters/` (`mod.rs`, `email`, `slack`, `post`, `command`), behaviour unchanged. New `http.rs`: `Http::new(rule, prefix, timeout)` reads `<prefix>_proxy/_ca_certs/_ignore_ssl_errors/_timeout`, `post_json` maps HTTP errors; `slack` and `post` use it. `testutil` (test-only): `rule()` loader and `capture()` in-process HTTP server for payload assertions. `sink.py` now records the method and accepts PUT. 48 tests green, 37 parity rules validate |

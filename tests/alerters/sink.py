@@ -17,8 +17,9 @@ class Http(BaseHTTPRequestHandler):
             body = json.loads(body)
         except ValueError:
             body = body.decode(errors='replace')
-        record('http', path=self.path, headers={k.lower(): v for k, v in self.headers.items()}, body=body)
+        record('http', method=self.command, path=self.path, headers={k.lower(): v for k, v in self.headers.items()}, body=body)
         self.send_response(200); self.end_headers(); self.wfile.write(b'ok')
+    do_PUT = do_POST
     def log_message(self, *a): pass
 
 class Smtp(socketserver.StreamRequestHandler):
