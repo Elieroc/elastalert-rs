@@ -76,7 +76,8 @@ Alerter pagerduty / opsgenie / victorops / pagertree / alertmanager / flashduty,
 Alerter jira (ticket id passed to email via pipeline),alerter,could,yes,no,big (21KB)
 Alerter thehive / iris / servicenow / zabbix / datadog / gelf / indexer,alerter,could,yes,no,SOC-relevant: thehive iris indexer gelf
 Alerter sns / sqs / ses / stomp / twilio / exotel / smseagle / tencent sms,alerter,could,yes,no,
-Alerters CN/regional (dingtalk lark line workwechat chatwork yzj gitter alerta),alerter,could,yes,no,
+Alerter gitter / chatwork / line / lark / dingtalk / workwechat / yzj,alerter,could,yes,yes,"lot 2: unit tests on payloads (dingtalk signature checked against Python); fixed-URL services are unit-tested only"
+Alerter alerta,alerter,could,yes,no,
 Alert pipeline shared dict between alerters; alerts_order jira before email,alerting,could,yes,no,
 Writeback indices: elastalert elastalert_status elastalert_error silence past_elastalert (ES 7 and 8 mappings),writeback,must,yes,yes,5 indices created with upstream ES 8 mappings (also used on 7)
 create_index CLI (elastalert-create-index),writeback,should,yes,yes,`elastalert create-index [--index --old-index --recreate]`; ES conn from config

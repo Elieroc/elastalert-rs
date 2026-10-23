@@ -1,10 +1,16 @@
 //! Alerters. Each is built once per rule from its keys; one submodule per alerter or family.
 
+mod chatwork;
 mod command;
+mod crypto;
+mod dingtalk;
 mod discord;
 mod email;
+mod gitter;
 mod googlechat;
 pub mod http;
+mod lark;
+mod line;
 mod matrixhookshot;
 mod mattermost;
 mod post;
@@ -14,6 +20,8 @@ mod rocketchat;
 mod slack;
 mod telegram;
 mod webex;
+mod workwechat;
+mod yzj;
 
 pub use email::{mailbox, read_account_file, send_mail};
 
@@ -42,6 +50,13 @@ pub enum Alerter {
     RocketChat(rocketchat::RocketChat),
     Webex(webex::Webex),
     MatrixHookshot(matrixhookshot::MatrixHookshot),
+    Chatwork(chatwork::Chatwork),
+    DingTalk(dingtalk::DingTalk),
+    Gitter(gitter::Gitter),
+    Lark(lark::Lark),
+    Line(line::Line),
+    WorkWechat(workwechat::WorkWechat),
+    Yzj(yzj::Yzj),
 }
 
 /// Read-only view the alerters need to produce text.
@@ -70,6 +85,13 @@ impl Alerter {
             "rocketchat" => Alerter::RocketChat(rocketchat::RocketChat::new(rule)?),
             "webex_webhook" => Alerter::Webex(webex::Webex::new(rule)?),
             "matrixhookshot" => Alerter::MatrixHookshot(matrixhookshot::MatrixHookshot::new(rule)?),
+            "chatwork" => Alerter::Chatwork(chatwork::Chatwork::new(rule)?),
+            "dingtalk" => Alerter::DingTalk(dingtalk::DingTalk::new(rule)?),
+            "gitter" => Alerter::Gitter(gitter::Gitter::new(rule)?),
+            "lark" => Alerter::Lark(lark::Lark::new(rule)?),
+            "line" => Alerter::Line(line::Line::new(rule)?),
+            "workwechat" => Alerter::WorkWechat(workwechat::WorkWechat::new(rule)?),
+            "yzj" => Alerter::Yzj(yzj::Yzj::new(rule)?),
             other => bail!("alerter '{other}' is not supported yet"),
         })
     }
@@ -90,6 +112,13 @@ impl Alerter {
             Alerter::RocketChat(_) => "rocketchat",
             Alerter::Webex(_) => "webex_webhook",
             Alerter::MatrixHookshot(_) => "matrixhookshot",
+            Alerter::Chatwork(_) => "chatwork",
+            Alerter::DingTalk(_) => "dingtalk",
+            Alerter::Gitter(_) => "gitter",
+            Alerter::Lark(_) => "lark",
+            Alerter::Line(_) => "line",
+            Alerter::WorkWechat(_) => "workwechat",
+            Alerter::Yzj(_) => "yzj",
         }
     }
 
@@ -110,6 +139,13 @@ impl Alerter {
             Alerter::RocketChat(a) => a.info(),
             Alerter::Webex(a) => a.info(),
             Alerter::MatrixHookshot(a) => a.info(),
+            Alerter::Chatwork(a) => a.info(),
+            Alerter::DingTalk(a) => a.info(),
+            Alerter::Gitter(a) => a.info(),
+            Alerter::Lark(a) => a.info(),
+            Alerter::Line(a) => a.info(),
+            Alerter::WorkWechat(a) => a.info(),
+            Alerter::Yzj(a) => a.info(),
         }
     }
 
@@ -139,6 +175,13 @@ impl Alerter {
             Alerter::RocketChat(a) => a.alert(v, matches).await,
             Alerter::Webex(a) => a.alert(v, matches).await,
             Alerter::MatrixHookshot(a) => a.alert(v, matches).await,
+            Alerter::Chatwork(a) => a.alert(v, matches).await,
+            Alerter::DingTalk(a) => a.alert(v, matches).await,
+            Alerter::Gitter(a) => a.alert(v, matches).await,
+            Alerter::Lark(a) => a.alert(v, matches).await,
+            Alerter::Line(a) => a.alert(v, matches).await,
+            Alerter::WorkWechat(a) => a.alert(v, matches).await,
+            Alerter::Yzj(a) => a.alert(v, matches).await,
         }
     }
 }

@@ -7,6 +7,11 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use std::time::Duration;
 
+enum Body<'a> {
+    Json(&'a Value),
+    Form(String),
+}
+
 pub struct Http {
     client: reqwest::Client,
 }
@@ -45,15 +50,27 @@ impl Http {
     /// POSTs `body` as JSON; any HTTP error status is an error. `what` completes "Error posting ...".
     /// `headers` replace the defaults of the same name (like merging dicts upstream).
     pub async fn post_json(&self, what: &str, url: &str, headers: &[(String, String)], body: &Value) -> Result<reqwest::Response> {
-        self.send(what, url, headers, body, false).await
+        self.send(what, url, headers, Body::Json(body), false).await
+    }
+
+    /// POSTs `fields` as `application/x-www-form-urlencoded` with the error details of `post_json_details`.
+    pub async fn post_form_details(&self, what: &str, url: &str, headers: &[(String, String)], fields: &[(&str, String)]) -> Result<reqwest::Response> {
+        let encoded = {
+            let mut enc = url::form_urlencoded::Serializer::new(String::new());
+            for (k, v) in fields {
+                enc.append_pair(k, v);
+            }
+            enc.finish()
+        };
+        self.send(what, url, headers, Body::Form(encoded), true).await
     }
 
     /// Like `post_json`, and the error carries the response text ("... Details: ..."), as upstream's Discord and Telegram do.
     pub async fn post_json_details(&self, what: &str, url: &str, headers: &[(String, String)], body: &Value) -> Result<reqwest::Response> {
-        self.send(what, url, headers, body, true).await
+        self.send(what, url, headers, Body::Json(body), true).await
     }
 
-    async fn send(&self, what: &str, url: &str, headers: &[(String, String)], body: &Value, details: bool) -> Result<reqwest::Response> {
+    async fn send(&self, what: &str, url: &str, headers: &[(String, String)], body: Body<'_>, details: bool) -> Result<reqwest::Response> {
         let mut map = HeaderMap::new();
         for (k, v) in headers {
             map.insert(
@@ -64,7 +81,11 @@ impl Http {
         let fail = |e: reqwest::Error, text: &str| {
             if details { anyhow::anyhow!("Error posting {what}: {e}. Details: {text}") } else { anyhow::anyhow!("Error posting {what}: {e}") }
         };
-        let resp = self.client.post(url).json(body).headers(map).send().await.map_err(|e| fail(e, ""))?;
+        let req = match body {
+            Body::Json(v) => self.client.post(url).json(v),
+            Body::Form(s) => self.client.post(url).header("Content-Type", "application/x-www-form-urlencoded").body(s),
+        };
+        let resp = req.headers(map).send().await.map_err(|e| fail(e, ""))?;
         if let Err(e) = resp.error_for_status_ref() {
             let text = if details { resp.text().await.unwrap_or_default() } else { String::new() };
             bail!(fail(e, &text));

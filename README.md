@@ -218,7 +218,7 @@ Options not listed anywhere are ignored, as in ElastAlert 2, so typos are not de
 
 ### Alerters
 
-ElastAlert 2 has 44 alerters. **14 are ported** (`debug`, `email`, `slack`, `post`, `command`, and the nine chat webhooks below); a rule naming any other alerter is rejected.
+ElastAlert 2 has 44 alerters. **21 are ported** (`debug`, `email`, `slack`, `post`, `command`, and the sixteen chat webhooks below); a rule naming any other alerter is rejected.
 
 | Alerter | Status |
 | --- | --- |
@@ -236,7 +236,13 @@ ElastAlert 2 has 44 alerters. **14 are ported** (`debug`, `email`, `slack`, `pos
 | `googlechat` | supported: `basic` and `card` formats, card header and Kibana footer button, proxy |
 | `webex_webhook` | supported: `webex_webhook_id`, `webex_webhook_msgtype` (text / markdown) |
 | `matrixhookshot` | supported: webhook URL(s), username, text and html overrides, proxy, CA file, timeout, ignore SSL errors |
-| `gitter`, `lark`, `dingtalk`, `workwechat`, `chatwork`, `line`, `yzj` | **not ported** (regional chat webhooks) |
+| `gitter` | supported: single webhook URL, `gitter_msg_level`, proxy |
+| `chatwork` | supported: API key, room id, form-encoded post, cropping at 2047 characters, proxy with login |
+| `line` | supported: LINE Messaging API push (`line_channel_access_token`, `line_to`), cropping at 4800 characters. Both options are required here; upstream mistypes `required_options` and never checks them |
+| `lark` | supported: `lark_bot_id`, `lark_msgtype` |
+| `dingtalk` | supported: `text`, `markdown`, `single_action_card`, `action_card`, `dingtalk_sign` secret, proxy with login. Another `dingtalk_msgtype` is rejected at load (upstream fails at send time). The signature is computed for every alert; upstream appends a second `timestamp`/`sign` to its stored URL on each alert |
+| `workwechat` | supported: `work_wechat_bot_id`, `work_wechat_msgtype` `text` or `markdown` (other values rejected at load) |
+| `yzj` | supported: `yzj_token`, `yzj_type`, `yzj_custom_loc`, proxy |
 | `pagerduty`, `opsgenie`, `victorops`, `pagertree`, `alertmanager`, `flashduty`, `alerta`, `zabbix`, `datadog` | **not ported** |
 | `jira`, `servicenow`, `hivealerter` (TheHive), `iris`, `gelf`, `indexer` | **not ported** |
 | `sns`, `sqs`, `ses`, `stomp`, `twilio`, `exotel`, `smseagle`, `tencent_sms` | **not ported** |
@@ -262,7 +268,7 @@ Each alerter has its own delivery state: if Slack is down and email works, only 
 
 **Not covered** (summary; details in the tables above)
 
-- 30 of 44 alerters, notably PagerDuty, Opsgenie, Jira, TheHive, SNS/SES, Zabbix.
+- 23 of 44 alerters, notably PagerDuty, Opsgenie, Jira, TheHive, SNS/SES, Zabbix.
 - Python match enhancements (Rust modules instead, see [docs/enhancements.md](docs/enhancements.md)) and custom `jinja_filters`.
 - `notify_alert` (error notifications through alerters), statsd, AWS SigV4 signing, `replace_dots_in_field_names`.
 - Per-rule Elasticsearch connections, Python plugins of any kind (rule types, alerters, loaders, enhancements, filters), Python `logging:` config.
