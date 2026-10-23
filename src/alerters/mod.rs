@@ -1,15 +1,24 @@
 //! Alerters. Each is built once per rule from its keys; one submodule per alerter or family.
 
 mod command;
+mod discord;
 mod email;
+mod googlechat;
 pub mod http;
+mod matrixhookshot;
+mod mattermost;
 mod post;
+mod post2;
+mod power_automate;
+mod rocketchat;
 mod slack;
+mod telegram;
+mod webex;
 
 pub use email::{mailbox, read_account_file, send_mail};
 
 use crate::alert;
-use crate::field::{lookup, py_str};
+use crate::field::{lookup, py_str, truthy};
 use crate::rule::Rule;
 use crate::types::RuleType;
 use anyhow::{Result, bail};
@@ -24,6 +33,15 @@ pub enum Alerter {
     Slack(slack::Slack),
     Post(post::Post),
     Command(command::Command),
+    Post2(post2::Post2),
+    Mattermost(mattermost::Mattermost),
+    PowerAutomate(power_automate::PowerAutomate),
+    Discord(discord::Discord),
+    Telegram(telegram::Telegram),
+    GoogleChat(googlechat::GoogleChat),
+    RocketChat(rocketchat::RocketChat),
+    Webex(webex::Webex),
+    MatrixHookshot(matrixhookshot::MatrixHookshot),
 }
 
 /// Read-only view the alerters need to produce text.
@@ -43,6 +61,15 @@ impl Alerter {
             "slack" => Alerter::Slack(slack::Slack::new(rule)?),
             "post" => Alerter::Post(post::Post::new(rule)?),
             "command" => Alerter::Command(command::Command::new(rule)?),
+            "post2" => Alerter::Post2(post2::Post2::new(rule)?),
+            "mattermost" => Alerter::Mattermost(mattermost::Mattermost::new(rule)?),
+            "ms_power_automate" => Alerter::PowerAutomate(power_automate::PowerAutomate::new(rule)?),
+            "discord" => Alerter::Discord(discord::Discord::new(rule)?),
+            "telegram" => Alerter::Telegram(telegram::Telegram::new(rule)?),
+            "googlechat" => Alerter::GoogleChat(googlechat::GoogleChat::new(rule)?),
+            "rocketchat" => Alerter::RocketChat(rocketchat::RocketChat::new(rule)?),
+            "webex_webhook" => Alerter::Webex(webex::Webex::new(rule)?),
+            "matrixhookshot" => Alerter::MatrixHookshot(matrixhookshot::MatrixHookshot::new(rule)?),
             other => bail!("alerter '{other}' is not supported yet"),
         })
     }
@@ -54,6 +81,15 @@ impl Alerter {
             Alerter::Slack(_) => "slack",
             Alerter::Post(_) => "post",
             Alerter::Command(_) => "command",
+            Alerter::Post2(_) => "post2",
+            Alerter::Mattermost(_) => "mattermost",
+            Alerter::PowerAutomate(_) => "ms_power_automate",
+            Alerter::Discord(_) => "discord",
+            Alerter::Telegram(_) => "telegram",
+            Alerter::GoogleChat(_) => "googlechat",
+            Alerter::RocketChat(_) => "rocketchat",
+            Alerter::Webex(_) => "webex_webhook",
+            Alerter::MatrixHookshot(_) => "matrixhookshot",
         }
     }
 
@@ -65,6 +101,15 @@ impl Alerter {
             Alerter::Slack(s) => json!({"type": "slack", "slack_username_override": s.username}),
             Alerter::Post(p) => json!({"type": "http_post", "http_post_webhook_url": p.urls}),
             Alerter::Command(c) => json!({"type": "command", "command": c.argv.join(" ")}),
+            Alerter::Post2(a) => a.info(),
+            Alerter::Mattermost(a) => a.info(),
+            Alerter::PowerAutomate(a) => a.info(),
+            Alerter::Discord(a) => a.info(),
+            Alerter::Telegram(a) => a.info(),
+            Alerter::GoogleChat(a) => a.info(),
+            Alerter::RocketChat(a) => a.info(),
+            Alerter::Webex(a) => a.info(),
+            Alerter::MatrixHookshot(a) => a.info(),
         }
     }
 
@@ -85,6 +130,15 @@ impl Alerter {
             Alerter::Slack(s) => s.alert(v, matches).await,
             Alerter::Post(p) => p.alert(matches).await,
             Alerter::Command(c) => c.alert(v, matches).await,
+            Alerter::Post2(a) => a.alert(matches).await,
+            Alerter::Mattermost(a) => a.alert(v, matches).await,
+            Alerter::PowerAutomate(a) => a.alert(v, matches).await,
+            Alerter::Discord(a) => a.alert(v, matches).await,
+            Alerter::Telegram(a) => a.alert(v, matches).await,
+            Alerter::GoogleChat(a) => a.alert(v, matches).await,
+            Alerter::RocketChat(a) => a.alert(v, matches).await,
+            Alerter::Webex(a) => a.alert(v, matches).await,
+            Alerter::MatrixHookshot(a) => a.alert(v, matches).await,
         }
     }
 }
@@ -108,6 +162,33 @@ fn list(rule: &Rule, key: &str) -> Vec<String> {
         Some(Value::Array(a)) => a.iter().map(py_str).collect(),
         _ => vec![],
     }
+}
+
+/// The option as set, else `default`.
+fn opt(rule: &Rule, key: &str, default: Value) -> Value {
+    rule.raw.get(key).cloned().unwrap_or(default)
+}
+
+/// Text of `matches` as upstream's `str(BasicMatchString)` loop builds it (Discord, Telegram): no aggregation summary.
+fn per_match_text(v: &View<'_>, matches: &[Doc]) -> String {
+    let mut body = String::new();
+    for m in matches {
+        body.push_str(&alert::match_body(v.rule, v.rtype, m, v.ts_fmt));
+        if matches.len() > 1 {
+            body.push_str("\n----------------------------------------\n");
+        }
+    }
+    body
+}
+
+/// Python `text[:keep] + suffix` when `text` is longer than `limit` characters.
+fn crop(text: String, limit: usize, keep: usize, suffix: &str) -> String {
+    if text.chars().count() > limit { text.chars().take(keep).collect::<String>() + suffix } else { text }
+}
+
+/// `kibana_discover_url` / `opensearch_discover_url` of the first match, when set.
+fn discover_url<'a>(matches: &'a [Doc], kind: &str) -> Option<&'a Value> {
+    lookup(&matches[0], &format!("{kind}_discover_url")).filter(|u| truthy(Some(u)))
 }
 
 fn required(rule: &Rule, kind: &str, key: &str) -> Result<()> {

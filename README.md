@@ -218,7 +218,7 @@ Options not listed anywhere are ignored, as in ElastAlert 2, so typos are not de
 
 ### Alerters
 
-ElastAlert 2 has 44 alerters. **5 are ported** (`debug`, `email`, `slack`, `post`, `command`); a rule naming any other alerter is rejected.
+ElastAlert 2 has 44 alerters. **14 are ported** (`debug`, `email`, `slack`, `post`, `command`, and the nine chat webhooks below); a rule naming any other alerter is rejected.
 
 | Alerter | Status |
 | --- | --- |
@@ -227,7 +227,16 @@ ElastAlert 2 has 44 alerters. **5 are ported** (`debug`, `email`, `slack`, `post
 | `slack` | supported: webhook URL(s), channel overrides (one message per channel), username, emoji / icon, colour, title, fields, footer, author, image, pretext, proxy, CA file, timeout, aggregation table in a code block. `slack_attach_kibana_discover_url` / `slack_attach_opensearch_discover_url` with their colour and title. **Not**: Jira attachment link |
 | `post` | supported: `http_post_url` (list), `http_post_payload`, `http_post_static_payload`, `http_post_all_values`, `http_post_headers`, proxy, CA file, timeout, ignore SSL errors |
 | `command` | supported: argument list or shell string, `{field}` / `%(field)s` substitution, `pipe_match_json`, `pipe_alert_text`, `fail_on_non_zero_exit` |
-| `post2`, `mattermost`, `ms_power_automate`, `discord`, `telegram`, `googlechat`, `rocketchat`, `webex_webhook`, `matrixhookshot`, `gitter`, `lark`, `dingtalk`, `workwechat`, `chatwork`, `line`, `yzj` | **not ported** (chat webhooks: the easiest to add) |
+| `post2` | supported: `http_post2_url` (list), Jinja `http_post2_payload` and `http_post2_headers` (values JSON-escaped as upstream, `jinja_root_name`), `http_post2_raw_fields`, `http_post2_all_values`, proxy, CA file, timeout, ignore SSL errors. Invalid templates fail at alert time, as upstream |
+| `mattermost` | supported: webhook URL(s), channel overrides (one post per channel), username, emoji / icon, pretext, colour, `mattermost_msg_fields` (with `args`), title, footer, author, image, thumb, Kibana / OpenSearch Discover attachments, `alert_text_type: alert_text_only`, proxy |
+| `rocketchat` | supported: webhook URL(s), channel overrides, username, emoji, colour, text, `rocket_chat_alert_fields`, Discover attachments, proxy, CA file, timeout, ignore SSL errors |
+| `ms_power_automate` | supported: Adaptive Card with summary, body size, facts, Kibana / OpenSearch Discover actions, full width, `ms_power_automate_webhook_url_from_field`, proxy, CA file, ignore SSL errors |
+| `discord` | supported: single webhook URL (a list is rejected), emoji title, embed colour / footer / icon, embed cropping at 2047 characters, proxy with login |
+| `telegram` | supported: bot token, room id, `telegram_api_url`, `telegram_parse_mode` (markdown / html), thread id, cropping at 4095 characters, proxy with login (`telegram_proxy_login`, `telegram_proxy_pass`) |
+| `googlechat` | supported: `basic` and `card` formats, card header and Kibana footer button, proxy |
+| `webex_webhook` | supported: `webex_webhook_id`, `webex_webhook_msgtype` (text / markdown) |
+| `matrixhookshot` | supported: webhook URL(s), username, text and html overrides, proxy, CA file, timeout, ignore SSL errors |
+| `gitter`, `lark`, `dingtalk`, `workwechat`, `chatwork`, `line`, `yzj` | **not ported** (regional chat webhooks) |
 | `pagerduty`, `opsgenie`, `victorops`, `pagertree`, `alertmanager`, `flashduty`, `alerta`, `zabbix`, `datadog` | **not ported** |
 | `jira`, `servicenow`, `hivealerter` (TheHive), `iris`, `gelf`, `indexer` | **not ported** |
 | `sns`, `sqs`, `ses`, `stomp`, `twilio`, `exotel`, `smseagle`, `tencent_sms` | **not ported** |
@@ -253,7 +262,7 @@ Each alerter has its own delivery state: if Slack is down and email works, only 
 
 **Not covered** (summary; details in the tables above)
 
-- 39 of 44 alerters, notably PagerDuty, Opsgenie, Jira, TheHive, Teams, Mattermost, Discord, Telegram, SNS/SES, Zabbix.
+- 30 of 44 alerters, notably PagerDuty, Opsgenie, Jira, TheHive, SNS/SES, Zabbix.
 - Python match enhancements (Rust modules instead, see [docs/enhancements.md](docs/enhancements.md)) and custom `jinja_filters`.
 - `notify_alert` (error notifications through alerters), statsd, AWS SigV4 signing, `replace_dots_in_field_names`.
 - Per-rule Elasticsearch connections, Python plugins of any kind (rule types, alerters, loaders, enhancements, filters), Python `logging:` config.

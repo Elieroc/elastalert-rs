@@ -70,6 +70,18 @@ pub fn lookup<'a>(doc: &'a Map<String, Value>, term: &str) -> Option<&'a Value> 
     Some(cur)
 }
 
+/// Python truthiness of a JSON value.
+pub fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(o)) => !o.is_empty(),
+        Some(Value::Bool(true)) => true,
+    }
+}
+
 /// Sets the value at the location `lookup` would read. Returns false when the term does not resolve.
 pub fn set(doc: &mut Map<String, Value>, term: &str, value: Value) -> bool {
     let mut path = Vec::new();
