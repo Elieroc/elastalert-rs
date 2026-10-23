@@ -60,7 +60,7 @@ Aggregation: aggregation timespan or cron schedule; aggregation_key; aggregate_b
 Pending-alert recovery after restart and retry of failed alerts (alert_time_limit),alerting,must,yes,yes,per-alerter retry with backoff (W10); recovered from ES at startup; tested
 top_count_keys / top_count_number,alerting,should,yes,yes,parity-tested; mock data supported in test-rule
 include_rule_params_in_matches,alerting,could,yes,no,
-Match enhancements (custom Python modules) + DropMatchException,alerting,skip,yes,partial,"built-in TimeEnhancement and run_enhancements_first; Python modules are rejected at load"
+Match enhancements (custom Python modules) + DropMatchException,alerting,skip,yes,partial,"Enhancement trait + registry of compiled modules: TimeEnhancement, rust.add_field, rust.drop_if, rust.lookup (Outcome::Drop = DropMatchException); run_enhancements_first; Python modules rejected; docs/enhancements.md"
 Custom Python rule/alerter modules via get_module,alerting,skip,yes,no,not portable to Rust
 alert_text / alert_text_args / alert_text_kw / alert_text_type / alert_subject(_args) / alert_missing_value,alert text,must,yes,partial,"alert_text args/kw, alert_subject(_args), alert_missing_value; no jinja; format specs ignored"
 Jinja alert text (alert_text_type alert_text_jinja jinja_template_path jinja_root_name jinja_filters),alert text,should,yes,yes,minijinja; alert_subject too; custom jinja_filters (Python modules) rejected at load

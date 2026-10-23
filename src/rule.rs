@@ -1,7 +1,7 @@
 //! Rule files: discovery, `import:` chains, defaults inherited from config.yaml, validation.
 
 use crate::config::{Config, read_yaml};
-use crate::enhancements::Enhancement;
+use crate::enhancements::{self, Enhancement};
 use crate::querylang::{self, QueryLang};
 use crate::time::{Dur, MINUTE, SECOND, parse_duration_map};
 use anyhow::{Context, Result, bail};
@@ -105,7 +105,7 @@ pub struct Rule {
     pub limit_execution_coverage: bool,
     pub kibana_discover: bool,
     pub opensearch_discover: bool,
-    pub enhancements: Vec<Enhancement>,
+    pub enhancements: Vec<std::sync::Arc<dyn Enhancement>>,
     pub run_enhancements_first: bool,
     /// Set when a `filter` entry is an `eql` or `esql` query.
     pub query_lang: Option<QueryLang>,
@@ -281,14 +281,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     if opensearch_discover {
         crate::discover::validate(&raw, "opensearch")?;
     }
-    let enhancements = match raw.get("match_enhancements") {
-        None | Some(Value::Null) => vec![],
-        Some(Value::Array(a)) => a
-            .iter()
-            .map(|v| v.as_str().context("match_enhancements entries must be strings").and_then(Enhancement::from_name))
-            .collect::<Result<Vec<_>>>()?,
-        Some(_) => bail!("match_enhancements must be a list"),
-    };
+    let enhancements = enhancements::load(raw.get("match_enhancements"), &raw)?;
     match raw.get("jinja_filters") {
         None | Some(Value::Null | Value::Bool(false)) => {}
         Some(Value::Array(a)) if a.is_empty() => {}
@@ -712,9 +705,11 @@ mod tests {
     #[test]
     fn enhancements_and_jinja_filters() {
         let r = load_text("me_ok", "match_enhancements: [TimeEnhancement]\nrun_enhancements_first: true\njinja_filters: []\n").unwrap();
-        assert_eq!(r.enhancements, vec![Enhancement::Time]);
+        assert_eq!(r.enhancements.len(), 1);
         assert!(r.run_enhancements_first);
         assert!(load_text("me_bad", "match_enhancements: [my.mod.Class]\n").is_err());
+        let r = load_text("me_rust", "match_enhancements:\n- rust.drop_if: {field: user.name, equals: svc}\n- TimeEnhancement\n").unwrap();
+        assert_eq!(r.enhancements.len(), 2);
         assert!(load_text("jf_bad", "jinja_filters: [filters.domain.DomainFilters]\n").is_err());
     }
 

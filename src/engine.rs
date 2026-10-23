@@ -4,6 +4,7 @@
 use crate::alert;
 use crate::alerters::{Alerter, View};
 use crate::discover;
+use crate::enhancements::Outcome;
 use crate::es::Es;
 use crate::field::{self, py_str};
 use crate::index;
@@ -692,9 +693,9 @@ impl RuleState {
                 let doc = json!({"exponent": exponent, "rule_name": key, "@timestamp": to_iso(now()), "until": to_iso(until)});
                 ctx.writeback.write(Wb::Silence, doc.as_object().cloned().unwrap_or_default()).await;
             }
-            if self.rule.run_enhancements_first {
-                // Upstream logs a failing enhancement and keeps the match.
-                self.enhance_one(ctx, &mut m).await;
+            // Upstream: run first, a failing enhancement keeps the match, a dropped one is still silenced.
+            if self.rule.run_enhancements_first && self.enhance_one(ctx, &mut m).await == Enhanced::Dropped {
+                continue;
             }
             if self.rule.aggregation.is_some() {
                 self.add_aggregated(ctx, m).await;
@@ -955,17 +956,21 @@ impl RuleState {
         }
     }
 
-    /// Runs every enhancement on a match. Returns false when one failed.
-    async fn enhance_one(&self, ctx: &Ctx, m: &mut Doc) -> bool {
-        let mut ok = true;
+    /// Runs the enhancements on a match in order; a drop stops the chain.
+    async fn enhance_one(&self, ctx: &Ctx, m: &mut Doc) -> Enhanced {
+        let mut result = Enhanced::Kept;
         for e in &self.rule.enhancements {
-            if let Err(err) = e.process(m) {
-                ok = false;
-                ctx.metrics.error();
-                ctx.writeback.error(format!("Error running match enhancement: {err:#}"), json!({"rule": self.rule.name})).await;
+            match e.process(m) {
+                Ok(Outcome::Keep) => {}
+                Ok(Outcome::Drop) => return Enhanced::Dropped,
+                Err(err) => {
+                    result = Enhanced::Failed;
+                    ctx.metrics.error();
+                    ctx.writeback.error(format!("Error running match enhancement: {err:#}"), json!({"rule": self.rule.name})).await;
+                }
             }
         }
-        ok
+        result
     }
 
     /// Everything a match gets right before alerting: top counts, Discover links (on the first match, as upstream)
@@ -989,7 +994,7 @@ impl RuleState {
         if !self.rule.run_enhancements_first && !self.rule.enhancements.is_empty() {
             let mut kept = Vec::with_capacity(matches.len());
             for mut m in matches {
-                if self.enhance_one(ctx, &mut m).await {
+                if self.enhance_one(ctx, &mut m).await == Enhanced::Kept {
                     kept.push(m);
                 }
             }
@@ -1189,6 +1194,15 @@ impl RuleState {
 
 /// Port of `next_alert_time`: with `exponential_realert` the silence doubles while matches keep coming.
 /// `cached` is the previous (until, exponent) for the same key.
+/// Result of the enhancement chain on one match.
+#[derive(PartialEq)]
+enum Enhanced {
+    Kept,
+    Dropped,
+    /// An enhancement returned an error (logged).
+    Failed,
+}
+
 /// Upstream: pause unless the estimated next end time (`end + run_every`) is within a minute of the next cron time.
 fn pause_until(exec_next: Ts, endtime: Ts, run_every: Dur) -> Option<Ts> {
     (endtime + run_every < exec_next - 59 * SECOND).then_some(exec_next)

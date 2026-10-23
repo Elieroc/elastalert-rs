@@ -150,3 +150,9 @@ summary_table_type html, `_source_enabled: false`, SigV4, statsd, Kibana/OpenSea
 | `match_enhancements` | partial | only `TimeEnhancement`; `run_enhancements_first` implemented as upstream (failure keeps the match when run first, drops it when run late). Python classes cannot be loaded and are rejected |
 | `jinja_filters` | not possible | the option names Python classes. Empty list accepted, otherwise rejected |
 | parity | done | `tests/parity/rules-ql`: 203 alerts identical (ES 8.15.5); the 37 original rules still 931 identical. One known difference: `TimeEnhancement` + `frequency` (see README, differences) |
+
+## Milestone 7 (2026-10-23)
+
+| area | status | notes |
+| --- | --- | --- |
+| native match enhancements | done | `Enhancement` trait (`process(&mut Doc) -> Result<Outcome>`, `Outcome::Drop` = `DropMatchException`) and a name -> constructor registry; options validated at load. Entries are names or one-key maps. Modules: `TimeEnhancement`, `rust.add_field`, `rust.drop_if`, `rust.lookup`. Drop semantics as upstream: late run removes the match (empty aggregation group sends nothing), `run_enhancements_first` skips it after the silence is set. Checked with `test-rule --data --alert`. Guide: `docs/enhancements.md` |
