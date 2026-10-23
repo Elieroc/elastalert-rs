@@ -1,7 +1,7 @@
 //! `alertmanager` alerter.
 
 use super::http::Http;
-use super::{Doc, View, list, required, s, s_or};
+use super::{Doc, View, list, py_json_dumps, required, s, s_or};
 use crate::alert::{create_alert_body, create_title};
 use crate::field::lookup;
 use crate::rule::Rule;
@@ -21,38 +21,6 @@ pub struct Alertmanager {
     resolve_timeout: Option<time::Dur>,
     root_name: Option<String>,
     http: Http,
-}
-
-/// `json.dumps(value)` as Python prints it: `", "` and `": "` separators, non-ASCII escaped.
-pub(super) fn py_json_dumps(v: &Value) -> String {
-    match v {
-        Value::String(s) => {
-            let mut out = String::from("\"");
-            for c in s.chars() {
-                match c {
-                    '"' => out.push_str("\\\""),
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    '\u{8}' => out.push_str("\\b"),
-                    '\u{c}' => out.push_str("\\f"),
-                    c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
-                        let mut buf = [0u16; 2];
-                        for unit in c.encode_utf16(&mut buf) {
-                            out.push_str(&format!("\\u{unit:04x}"));
-                        }
-                    }
-                    c => out.push(c),
-                }
-            }
-            out.push('"');
-            out
-        }
-        Value::Array(a) => format!("[{}]", a.iter().map(py_json_dumps).collect::<Vec<_>>().join(", ")),
-        Value::Object(o) => format!("{{{}}}", o.iter().map(|(k, x)| format!("{}: {}", py_json_dumps(&json!(k)), py_json_dumps(x))).collect::<Vec<_>>().join(", ")),
-        other => other.to_string(),
-    }
 }
 
 fn render_all(templates: &Map<String, Value>, context: &Value) -> Result<Map<String, Value>> {
@@ -171,7 +139,7 @@ mod tests {
         )
         .unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let p = Alertmanager::new(&r).unwrap().payload(&v, &[m()], 1_700_000_000_000_000).unwrap();
         assert_eq!(
             p["labels"],
@@ -186,7 +154,7 @@ mod tests {
     fn bad_template_syntax() {
         let r = rule("alertmanager", "alertmanager_hosts: ['http://am']\nalertmanager_labels: {a: '{{ oops'}\n").unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let err = Alertmanager::new(&r).unwrap().payload(&v, &[m()], 0).unwrap_err();
         assert!(err.to_string().contains("invalid Jinja2 syntax"), "{err}");
     }
@@ -197,7 +165,7 @@ mod tests {
         let (b, got_b) = capture(1, 200).await;
         let r = rule("alertmanager", &format!("alertmanager_hosts: ['{a}', '{b}']\nalertmanager_api_version: v2\nalertmanager_basic_auth_login: u\nalertmanager_basic_auth_password: p\n")).unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         Alertmanager::new(&r).unwrap().alert(&v, &[m()]).await.unwrap();
         let (ga, gb) = (got_a.await.unwrap(), got_b.await.unwrap());
         assert_eq!(ga[0].path, "/api/v2/alerts");

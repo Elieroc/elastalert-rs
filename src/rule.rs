@@ -491,7 +491,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     include.dedup();
     let enrich = !full && !kind.is_agg_query();
 
-    let alerts = match &raw["alert"] {
+    let mut alerts = match &raw["alert"] {
         Value::String(s) => vec![s.clone()],
         Value::Array(a) => a
             .iter()
@@ -503,6 +503,8 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
             .collect(),
         _ => bail!("alert must be a string or a list"),
     };
+    // Upstream's `alerts_order`: jira runs first, so email and slack can link its ticket. The sort is stable.
+    alerts.sort_by_key(|a| if a == "jira" { 0 } else { 1 });
 
     resolve_refs(&mut raw);
     let mut filter = match raw.get("filter") {
@@ -690,6 +692,17 @@ mod tests {
         std::fs::write(&file, format!("name: {name}\ntype: any\nindex: logs-*\nalert: debug\n{extra}")).unwrap();
         let conf = Config::load_with_defaults(&dir.join("none.yaml")).unwrap();
         load(&file, &conf)
+    }
+
+    #[test]
+    fn jira_runs_first_and_the_rest_keeps_its_order() {
+        let dir = std::env::temp_dir().join(format!("ea-rule-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("order.yaml");
+        std::fs::write(&file, "name: order\ntype: any\nindex: logs-*\nalert: [debug, email, jira, slack]\n").unwrap();
+        let conf = Config::load_with_defaults(&dir.join("none.yaml")).unwrap();
+        assert_eq!(load(&file, &conf).unwrap().alerts, ["jira", "debug", "email", "slack"]);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

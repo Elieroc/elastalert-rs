@@ -10,9 +10,14 @@ mod dingtalk;
 mod discord;
 mod email;
 mod flashduty;
+mod gelf;
 mod gitter;
 mod googlechat;
+mod hivealerter;
 pub mod http;
+mod indexer;
+mod iris;
+mod jira;
 mod lark;
 mod line;
 mod matrixhookshot;
@@ -24,6 +29,7 @@ mod post;
 mod post2;
 mod power_automate;
 mod rocketchat;
+mod servicenow;
 mod slack;
 mod telegram;
 mod victorops;
@@ -75,6 +81,12 @@ pub enum Alerter {
     PagerTree(pagertree::PagerTree),
     VictorOps(victorops::VictorOps),
     Zabbix(zabbix::Zabbix),
+    Gelf(gelf::Gelf),
+    Iris(iris::Iris),
+    ServiceNow(servicenow::ServiceNow),
+    Hive(hivealerter::Hive),
+    Indexer(indexer::Indexer),
+    Jira(jira::Jira),
 }
 
 /// Read-only view the alerters need to produce text.
@@ -82,6 +94,20 @@ pub struct View<'a> {
     pub rule: &'a Rule,
     pub rtype: &'a RuleType,
     pub ts_fmt: Option<&'a str>,
+    /// Shared by the alerters of one delivery, like upstream's `Alerter.pipeline`: `jira` leaves `jira_ticket` and
+    /// `jira_server` for the `email` and `slack` alerters that run after it.
+    pub pipeline: &'a Pipeline,
+}
+
+pub type Pipeline = std::sync::Mutex<Doc>;
+
+impl View<'_> {
+    /// `<server>/browse/<ticket>` when an earlier alerter opened or found a Jira ticket.
+    fn jira_url(&self) -> Option<String> {
+        let p = self.pipeline.lock().ok()?;
+        let ticket = p.get("jira_ticket")?.as_str()?;
+        Some(format!("{}/browse/{ticket}", p.get("jira_server")?.as_str()?))
+    }
 }
 
 pub const ALERT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -119,6 +145,12 @@ impl Alerter {
             "pagertree" => Alerter::PagerTree(pagertree::PagerTree::new(rule)?),
             "victorops" => Alerter::VictorOps(victorops::VictorOps::new(rule)?),
             "zabbix" => Alerter::Zabbix(zabbix::Zabbix::new(rule)?),
+            "gelf" => Alerter::Gelf(gelf::Gelf::new(rule)?),
+            "iris" => Alerter::Iris(iris::Iris::new(rule)?),
+            "servicenow" => Alerter::ServiceNow(servicenow::ServiceNow::new(rule)?),
+            "hivealerter" => Alerter::Hive(hivealerter::Hive::new(rule)?),
+            "indexer" => Alerter::Indexer(indexer::Indexer::new(rule)?),
+            "jira" => Alerter::Jira(jira::Jira::new(rule)?),
             other => bail!("alerter '{other}' is not supported yet"),
         })
     }
@@ -155,6 +187,12 @@ impl Alerter {
             Alerter::PagerTree(_) => "pagertree",
             Alerter::VictorOps(_) => "victorops",
             Alerter::Zabbix(_) => "zabbix",
+            Alerter::Gelf(_) => "gelf",
+            Alerter::Iris(_) => "iris",
+            Alerter::ServiceNow(_) => "servicenow",
+            Alerter::Hive(_) => "hivealerter",
+            Alerter::Indexer(_) => "indexer",
+            Alerter::Jira(_) => "jira",
         }
     }
 
@@ -191,6 +229,12 @@ impl Alerter {
             Alerter::PagerTree(a) => a.info(),
             Alerter::VictorOps(a) => a.info(),
             Alerter::Zabbix(a) => a.info(),
+            Alerter::Gelf(a) => a.info(),
+            Alerter::Iris(a) => a.info(),
+            Alerter::ServiceNow(a) => a.info(),
+            Alerter::Hive(a) => a.info(),
+            Alerter::Indexer(a) => a.info(),
+            Alerter::Jira(a) => a.info(),
         }
     }
 
@@ -236,6 +280,12 @@ impl Alerter {
             Alerter::PagerTree(a) => a.alert(v, matches).await,
             Alerter::VictorOps(a) => a.alert(v, matches).await,
             Alerter::Zabbix(a) => a.alert(v, matches).await,
+            Alerter::Gelf(a) => a.alert(v, matches).await,
+            Alerter::Iris(a) => a.alert(v, matches).await,
+            Alerter::ServiceNow(a) => a.alert(v, matches).await,
+            Alerter::Hive(a) => a.alert(v, matches).await,
+            Alerter::Indexer(a) => a.alert(v, matches).await,
+            Alerter::Jira(a) => a.alert(v, matches).await,
         }
     }
 }
@@ -299,6 +349,46 @@ fn format_with_args(rule: &Rule, template: &str, args: &[Value], m: &Doc, missin
         })
         .collect();
     alert::py_format(template, &values, &Map::new())
+}
+
+/// Match field `name`, else the rule option of that name, else `default` (upstream's `lookup_field`).
+fn lookup_field(rule: &Rule, m: &Doc, name: &str, default: Value) -> Value {
+    match lookup(m, name).filter(|v| !v.is_null()) {
+        Some(v) => v.clone(),
+        None => rule.raw.get(name).cloned().unwrap_or(default),
+    }
+}
+
+/// `json.dumps(value)` as Python prints it: `", "` and `": "` separators, non-ASCII escaped.
+fn py_json_dumps(v: &Value) -> String {
+    match v {
+        Value::String(s) => {
+            let mut out = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    '\u{8}' => out.push_str("\\b"),
+                    '\u{c}' => out.push_str("\\f"),
+                    c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                        let mut buf = [0u16; 2];
+                        for unit in c.encode_utf16(&mut buf) {
+                            out.push_str(&format!("\\u{unit:04x}"));
+                        }
+                    }
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
+        Value::Array(a) => format!("[{}]", a.iter().map(py_json_dumps).collect::<Vec<_>>().join(", ")),
+        Value::Object(o) => format!("{{{}}}", o.iter().map(|(k, x)| format!("{}: {}", py_json_dumps(&json!(k)), py_json_dumps(x))).collect::<Vec<_>>().join(", ")),
+        other => other.to_string(),
+    }
 }
 
 fn missing_text(rule: &Rule) -> &str {
@@ -403,43 +493,80 @@ pub(crate) mod testutil {
         }
     }
 
+    async fn read_request(sock: &mut tokio::net::TcpStream) -> Captured {
+        let mut buf = vec![];
+        let (head_end, len) = loop {
+            let mut chunk = [0u8; 4096];
+            let k = sock.read(&mut chunk).await.unwrap();
+            buf.extend_from_slice(&chunk[..k]);
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                let len = head.lines().find_map(|l| l.strip_prefix("content-length:")).map(|v| v.trim().parse().unwrap()).unwrap_or(0usize);
+                break (i + 4, len);
+            }
+            assert!(k > 0, "connection closed before headers");
+        };
+        while buf.len() < head_end + len {
+            let mut chunk = [0u8; 4096];
+            let k = sock.read(&mut chunk).await.unwrap();
+            buf.extend_from_slice(&chunk[..k]);
+        }
+        let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+        let mut lines = head.lines();
+        let mut first = lines.next().unwrap().split(' ');
+        let (method, path) = (first.next().unwrap().to_string(), first.next().unwrap().to_string());
+        let headers = lines.filter_map(|l| l.split_once(": ")).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        Captured { method, path, headers, body: String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned() }
+    }
+
+    async fn respond(sock: &mut tokio::net::TcpStream, status: u16, body: &str) {
+        let resp = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        sock.write_all(resp.as_bytes()).await.unwrap();
+    }
+
     /// Serves `n` requests with `status` and returns the base URL and a handle yielding what was received.
     pub async fn capture(n: usize, status: u16) -> (String, tokio::task::JoinHandle<Vec<Captured>>) {
+        capture_with(n, status, "ok").await
+    }
+
+    /// Like `capture`, answering every request with `body`.
+    pub async fn capture_with(n: usize, status: u16, body: &'static str) -> (String, tokio::task::JoinHandle<Vec<Captured>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let mut out = vec![];
             for _ in 0..n {
                 let (mut sock, _) = listener.accept().await.unwrap();
-                let mut buf = vec![];
-                let (head_end, len) = loop {
-                    let mut chunk = [0u8; 4096];
-                    let k = sock.read(&mut chunk).await.unwrap();
-                    buf.extend_from_slice(&chunk[..k]);
-                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
-                        let len = head.lines().find_map(|l| l.strip_prefix("content-length:")).map(|v| v.trim().parse().unwrap()).unwrap_or(0usize);
-                        break (i + 4, len);
-                    }
-                    assert!(k > 0, "connection closed before headers");
-                };
-                while buf.len() < head_end + len {
-                    let mut chunk = [0u8; 4096];
-                    let k = sock.read(&mut chunk).await.unwrap();
-                    buf.extend_from_slice(&chunk[..k]);
-                }
-                let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
-                let mut lines = head.lines();
-                let mut first = lines.next().unwrap().split(' ');
-                let (method, path) = (first.next().unwrap().to_string(), first.next().unwrap().to_string());
-                let headers = lines.filter_map(|l| l.split_once(": ")).map(|(k, v)| (k.to_string(), v.to_string())).collect();
-                out.push(Captured { method, path, headers, body: String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned() });
-                let resp = format!("HTTP/1.1 {status} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
-                sock.write_all(resp.as_bytes()).await.unwrap();
+                out.push(read_request(&mut sock).await);
+                respond(&mut sock, status, body).await;
             }
             out
         });
         (url, task)
+    }
+
+    /// `(method, path prefix, status, body)`: the first route that matches answers; no match is a 404.
+    pub type Route = (&'static str, &'static str, u16, String);
+
+    /// A mock server for a multi-call API. Returns its URL and the log of requests (in arrival order).
+    pub async fn serve(routes: Vec<Route>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Captured>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = log.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let req = read_request(&mut sock).await;
+                let (status, body) = routes
+                    .iter()
+                    .find(|(m, p, _, _)| *m == req.method && req.path.starts_with(p))
+                    .map_or((404, "{}".to_string()), |(_, _, s, b)| (*s, b.clone()));
+                seen.lock().unwrap().push(req);
+                respond(&mut sock, status, &body).await;
+            }
+        });
+        (url, log)
     }
 }
 

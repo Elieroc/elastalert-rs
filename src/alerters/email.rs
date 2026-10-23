@@ -72,7 +72,10 @@ impl Email {
     }
 
     pub(super) async fn alert(&self, v: &View<'_>, matches: &[Doc]) -> Result<()> {
-        let body = create_alert_body(v.rule, v.rtype, matches, v.ts_fmt);
+        let mut body = create_alert_body(v.rule, v.rtype, matches, v.ts_fmt);
+        if let Some(url) = v.jira_url() {
+            body.push_str(&format!("\nJira ticket: {url}"));
+        }
         let mut to = self.to.clone();
         if let Some(rec) = self.from_field.as_ref().and_then(|f| lookup(&matches[0], f)) {
             let with_domain = |n: &str| match &self.add_domain {

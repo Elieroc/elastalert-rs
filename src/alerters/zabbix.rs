@@ -179,7 +179,7 @@ mod tests {
             let (port, got) = fake_server(info).await;
             let r = rule("zabbix", &format!("zbx_host: web-1\nzbx_key: elastalert.hit\nzbx_sender_host: 127.0.0.1\nzbx_sender_port: {port}\n")).unwrap();
             let rt = RuleType::new(&r).unwrap();
-            let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+            let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
             let z = Zabbix::new(&r).unwrap();
             let m = json!({"@timestamp": "2023-11-14T22:13:20Z"}).as_object().unwrap().clone();
             z.alert(&v, &[m]).await.unwrap(); // a failed item only warns, as upstream
@@ -194,7 +194,7 @@ mod tests {
         drop(l);
         let r = rule("zabbix", &format!("zbx_host: h\nzbx_key: k\nzbx_sender_host: 127.0.0.1\nzbx_sender_port: {port}\n")).unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let m = json!({"@timestamp": 1}).as_object().unwrap().clone();
         let err = Zabbix::new(&r).unwrap().alert(&v, &[m]).await.unwrap_err();
         assert!(err.to_string().starts_with("Error sending alert to Zabbix:"), "{err}");

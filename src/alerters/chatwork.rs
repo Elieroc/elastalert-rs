@@ -57,7 +57,7 @@ mod tests {
         assert_eq!(c.url, "https://api.chatwork.com/v2/rooms/42/messages");
         c.url = format!("{url}/v2/rooms/42/messages");
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         c.alert(&v, &[json!({"a": "x y"}).as_object().unwrap().clone()]).await.unwrap();
         let got = got.await.unwrap();
         assert_eq!(got[0].header("x-chatworktoken"), Some("key"));

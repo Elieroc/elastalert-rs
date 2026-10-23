@@ -289,7 +289,7 @@ mod tests {
     fn default_post() {
         let r = rule("opsgenie", "opsgenie_key: genie\n").unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let og = OpsGenie::new(&r).unwrap();
         let post = og.post(&v, &[m()]).unwrap();
         assert_eq!(post["message"], json!("ElastAlert: r"));
@@ -308,7 +308,7 @@ mod tests {
         )
         .unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let post = OpsGenie::new(&r).unwrap().post(&v, &[m()]).unwrap();
         assert_eq!(post["message"], json!("msg bad"));
         assert_eq!(post["user"], json!("acct"));
@@ -323,13 +323,13 @@ mod tests {
     fn responder_fallbacks_and_bad_priority() {
         let r = rule("opsgenie", "opsgenie_key: g\nopsgenie_recipients: ['{x}']\nopsgenie_recipients_args: {x: nothere}\nopsgenie_default_recipients: [dflt]\nopsgenie_priority: high\n").unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let post = OpsGenie::new(&r).unwrap().post(&v, &[m()]).unwrap();
         assert_eq!(post["responders"], json!([{"username": "dflt", "type": "user"}]));
         assert!(post.get("priority").is_none());
         let r = rule("opsgenie", "opsgenie_key: g\nopsgenie_recipients: ['{x}']\nopsgenie_subject: 'S {0}'\nopsgenie_subject_args: [Stuff]\n").unwrap();
         let og = OpsGenie::new(&r).unwrap();
-        let post = og.post(&View { rule: &r, rtype: &rt, ts_fmt: None }, &[m()]).unwrap();
+        let post = og.post(&View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() }, &[m()]).unwrap();
         assert_eq!(post["responders"], json!([{"username": "{x}", "type": "user"}]));
         assert_eq!(post["message"], json!("S bad"));
     }
@@ -339,7 +339,7 @@ mod tests {
         let (url, got) = capture(1, 202).await;
         let r = rule("opsgenie", &format!("opsgenie_key: genie\nopsgenie_addr: {url}/v2/alerts\n")).unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         OpsGenie::new(&r).unwrap().alert(&v, &[m()]).await.unwrap();
         let got = got.await.unwrap();
         assert_eq!(got[0].header("authorization"), Some("GenieKey genie"));

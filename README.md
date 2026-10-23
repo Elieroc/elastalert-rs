@@ -218,13 +218,13 @@ Options not listed anywhere are ignored, as in ElastAlert 2, so typos are not de
 
 ### Alerters
 
-ElastAlert 2 has 44 alerters. **30 are ported** (`debug`, `email`, `slack`, `post`, `command`, the sixteen chat webhooks and the nine on-call / incident alerters below); a rule naming any other alerter is rejected.
+ElastAlert 2 has 44 alerters. **36 are ported** (`debug`, `email`, `slack`, `post`, `command`, the sixteen chat webhooks, the nine on-call / incident alerters and the six SOC / ticketing alerters below); a rule naming any other alerter is rejected.
 
 | Alerter | Status |
 | --- | --- |
 | `debug` | supported |
 | `email` | supported: `email`, `cc`, `bcc`, `smtp_host`, `smtp_port`, `smtp_ssl`, STARTTLS, `smtp_auth_file`, `from_addr`, `email_reply_to`, `email_format: html`, `email_from_field`, `email_add_domain`. **Not**: `email_image_keys` / `assets_dir` (inline images), `smtp_cert_file` / `smtp_key_file` (a warning is logged) |
-| `slack` | supported: webhook URL(s), channel overrides (one message per channel), username, emoji / icon, colour, title, fields, footer, author, image, pretext, proxy, CA file, timeout, aggregation table in a code block. `slack_attach_kibana_discover_url` / `slack_attach_opensearch_discover_url` with their colour and title. **Not**: Jira attachment link |
+| `slack` | supported: webhook URL(s), channel overrides (one message per channel), username, emoji / icon, colour, title, fields, footer, author, image, pretext, proxy, CA file, timeout, aggregation table in a code block. `slack_attach_kibana_discover_url` / `slack_attach_opensearch_discover_url` with their colour and title. `slack_attach_jira_ticket_url` (+ `slack_jira_ticket_color`, `slack_jira_ticket_title`) links the ticket opened by the `jira` alerter of the same rule |
 | `post` | supported: `http_post_url` (list), `http_post_payload`, `http_post_static_payload`, `http_post_all_values`, `http_post_headers`, proxy, CA file, timeout, ignore SSL errors |
 | `command` | supported: argument list or shell string, `{field}` / `%(field)s` substitution, `pipe_match_json`, `pipe_alert_text`, `fail_on_non_zero_exit` |
 | `post2` | supported: `http_post2_url` (list), Jinja `http_post2_payload` and `http_post2_headers` (values JSON-escaped as upstream, `jinja_root_name`), `http_post2_raw_fields`, `http_post2_all_values`, proxy, CA file, timeout, ignore SSL errors. Invalid templates fail at alert time, as upstream |
@@ -252,7 +252,12 @@ ElastAlert 2 has 44 alerters. **30 are ported** (`debug`, `email`, `slack`, `pos
 | `alerta` | supported: all `alerta_*` options, including `alerta_use_match_timestamp` and `alerta_use_qk_as_resource` (applied per alert; upstream overwrites its stored resource the first time). `createTime` is UTC (upstream uses the local clock labelled `Z`) |
 | `datadog` | supported: API / app keys, `datadog_api_url` |
 | `zabbix` | supported: `zbx_host`, `zbx_key`, `zbx_host_from_field`, `zbx_sender_host`, `zbx_sender_port`, `timestamp_strptime`; native trapper protocol, no TLS (`zbx_sender` without PSK/cert). A server-side failed item only logs a warning, as upstream |
-| `jira`, `servicenow`, `hivealerter` (TheHive), `iris`, `gelf`, `indexer` | **not ported** |
+| `jira` | supported: `jira_server`, `jira_account_file` (user + password, or `apikey` as a bearer token), project, issue type, parent, components, labels, priority (index in Jira's priority list), assignee, watchers, description, any other `jira_<field name or id>` option (typed from the field's schema, `'#match.field'` reads a match field), `jira_bump_tickets` with `jira_bump_in_statuses` / `jira_bump_not_in_statuses` / `jira_bump_after_inactivity` / `jira_max_age` / `jira_ignore_in_title` / `jira_bump_only`, `jira_transition_to`. The ticket is linked in the `email` body and the `slack` attachment (`alerts_order`: `jira` runs before the other alerters of a rule). Jira is contacted on the first alert, not at load, so `validate` works offline. Searching for an existing ticket uses `/rest/api/3/search/jql` on Jira Cloud and `/rest/api/2/search` on Server / Data Center (upstream only knows the first, so bumping never finds anything on Data Center). Upstream also appends labels to an existing ticket in memory only; that no-op is not reproduced. When a fresh ticket is left alone because it was updated recently, no link is added (upstream prints `.../browse/None`) |
+| `hivealerter` | supported: `hive_connection` (host, port, API key, proxies, `hive_verify`, false by default as upstream), `hive_alert_config` with `*_args` formatting for description, title, type and source, tags, custom fields, `hive_observable_data_mapping`. `type` and `source` are required in the alert config (upstream fails with `KeyError` without them). Of each observable mapping, the first key that is not `tlp` / `message` / `tags` is the observable type |
+| `iris` | supported: `alert` and `case` types, IOCs, alert context, tags, source link, customer, case template, CA file, ignore SSL errors. Another `iris_type` is rejected at load (upstream silently sends nothing) |
+| `servicenow` | supported: all options. The description holds only the last match, as upstream |
+| `gelf` | supported: `http` (the HTTP status is not checked, as upstream) and `tcp`, headers, CA file for HTTP, timeout. `gelf_ca_cert` with `tcp` is rejected (upstream's TLS path cannot work); another `gelf_type` is rejected at load. The `host` field is the machine's host name, without the DNS lookup of `getfqdn()` |
+| `indexer` | supported: `indexer_alert_config` with field lookup (match, then rule option, else the text itself), `name` / `value` lists, `filter`, nested keys; `indexer_connection` or an `indexer_config` YAML file (same keys as `config.yaml`) with `indexer_alerts_name` |
 | `sns`, `sqs`, `ses`, `stomp`, `twilio`, `exotel`, `smseagle`, `tencent_sms` | **not ported** |
 | custom Python alerters | **not possible** |
 
@@ -276,7 +281,7 @@ Each alerter has its own delivery state: if Slack is down and email works, only 
 
 **Not covered** (summary; details in the tables above)
 
-- 14 of 44 alerters, notably Jira, TheHive, SNS/SES.
+- 8 of 44 alerters: SNS, SQS, SES, STOMP, Twilio, Exotel, SMSEagle, Tencent SMS.
 - Python match enhancements (Rust modules instead, see [docs/enhancements.md](docs/enhancements.md)) and custom `jinja_filters`.
 - `notify_alert` (error notifications through alerters), statsd, AWS SigV4 signing, `replace_dots_in_field_names`.
 - Per-rule Elasticsearch connections, Python plugins of any kind (rule types, alerters, loaders, enhancements, filters), Python `logging:` config.

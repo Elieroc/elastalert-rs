@@ -42,6 +42,8 @@ impl Slack {
             ("slack_kibana_discover_title", json!("Discover in Kibana")),
             ("slack_opensearch_discover_color", json!("#ec4b98")),
             ("slack_opensearch_discover_title", json!("Discover in Opensearch")),
+            ("slack_jira_ticket_color", json!("#ec4b98")),
+            ("slack_jira_ticket_title", json!("Jira Ticket")),
         ] {
             opts.insert(key, rule.raw.get(key).cloned().unwrap_or(default));
         }
@@ -106,6 +108,11 @@ impl Slack {
                 attachments.push(json!({"color": o(&format!("slack_{kind}_discover_color")), "title": o(&format!("slack_{kind}_discover_title")), "title_link": url}));
             }
         }
+        if v.rule.raw.get("slack_attach_jira_ticket_url").and_then(Value::as_bool).unwrap_or(false)
+            && let Some(url) = v.jira_url()
+        {
+            attachments.push(json!({"color": o("slack_jira_ticket_color"), "title": o("slack_jira_ticket_title"), "title_link": url}));
+        }
         let mut payload = json!({
             "username": self.username,
             "parse": o("slack_parse_override"),
@@ -125,5 +132,37 @@ impl Slack {
         }
         log::info!("Alert '{}' sent to Slack", v.rule.name);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alerters::testutil::{capture, rule};
+    use crate::alerters::Pipeline;
+    use crate::types::RuleType;
+
+    #[tokio::test]
+    async fn jira_ticket_is_attached_when_asked() {
+        for (attach, ticket, expect) in [(true, Some("PROJ-3"), true), (true, None, false), (false, Some("PROJ-3"), false)] {
+            let (url, got) = capture(1, 200).await;
+            let flag = if attach { "slack_attach_jira_ticket_url: true\nslack_jira_ticket_title: Ticket\n" } else { "" };
+            let r = rule("slack", &format!("slack_webhook_url: {url}\n{flag}")).unwrap();
+            let rt = RuleType::new(&r).unwrap();
+            let pipeline = Pipeline::default();
+            if let Some(t) = ticket {
+                let mut p = pipeline.lock().unwrap();
+                p.insert("jira_ticket".into(), json!(t));
+                p.insert("jira_server".into(), json!("https://jira.example"));
+            }
+            let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &pipeline };
+            Slack::new(&r).unwrap().alert(&v, &[json!({"a": 1}).as_object().unwrap().clone()]).await.unwrap();
+            let attachments = got.await.unwrap()[0].json()["attachments"].clone();
+            if expect {
+                assert_eq!(attachments[1], json!({"color": "#ec4b98", "title": "Ticket", "title_link": "https://jira.example/browse/PROJ-3"}));
+            } else {
+                assert_eq!(attachments.as_array().unwrap().len(), 1);
+            }
+        }
     }
 }

@@ -145,7 +145,7 @@ mod tests {
         let (url, got) = capture(1, 200).await;
         let r = rule("mattermost", &format!("alert_text_type: alert_text_only\nalert_subject: Test Mattermost\nmattermost_webhook_url: {url}\nmattermost_msg_pretext: aaaaa\n")).unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         Mattermost::new(&r).unwrap().alert(&v, &[m()]).await.unwrap();
         let got = got.await.unwrap();
         assert_eq!(
@@ -165,7 +165,7 @@ mod tests {
         );
         let r = rule("mattermost", &extra).unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         Mattermost::new(&r).unwrap().alert(&v, &[m()]).await.unwrap();
         let got = got.await.unwrap();
         assert_eq!(got.len(), 2);

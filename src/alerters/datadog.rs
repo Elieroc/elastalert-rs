@@ -54,7 +54,7 @@ mod tests {
         let (url, got) = capture(1, 200).await;
         let r = rule("datadog", &format!("datadog_api_key: k1\ndatadog_app_key: k2\ndatadog_api_url: {url}/events\nalert_subject: S\n")).unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         Datadog::new(&r).unwrap().alert(&v, &[json!({"a": 1}).as_object().unwrap().clone()]).await.unwrap();
         let got = got.await.unwrap();
         assert_eq!((got[0].header("dd-api-key"), got[0].header("dd-application-key")), (Some("k1"), Some("k2")));

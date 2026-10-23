@@ -110,7 +110,7 @@ mod tests {
         )
         .unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let m = json!({"host": {"name": "web-1"}}).as_object().unwrap().clone();
         RocketChat::new(&r).unwrap().alert(&v, &[m]).await.unwrap();
         assert_eq!(

@@ -887,7 +887,9 @@ impl RuleState {
 
     /// Runs every alerter not yet done for `p`. Returns true when all succeeded.
     async fn deliver(&self, ctx: &Ctx, p: &mut Pending) -> bool {
-        let view = View { rule: &self.rule, rtype: &self.rtype, ts_fmt: ctx.ts_fmt.as_deref() };
+        let pipeline = crate::alerters::Pipeline::default();
+        pipeline.lock().expect("fresh mutex").insert("alert_time".into(), json!(to_iso(p.alert_time)));
+        let view = View { rule: &self.rule, rtype: &self.rtype, ts_fmt: ctx.ts_fmt.as_deref(), pipeline: &pipeline };
         let mut all = true;
         for (i, a) in self.alerters.iter().enumerate() {
             if p.done[i] {

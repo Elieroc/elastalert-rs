@@ -47,7 +47,7 @@ mod tests {
         let (url, got) = capture(2, 200).await;
         let r = rule("pagertree", &format!("pagertree_integration_url: {url}/i\nalert_subject: S\n")).unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let p = PagerTree::new(&r).unwrap();
         let m = json!({"a": 1}).as_object().unwrap().clone();
         p.alert(&v, &[m.clone()]).await.unwrap();

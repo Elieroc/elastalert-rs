@@ -62,7 +62,7 @@ mod tests {
         for extra in ["", "matrixhookshot_username: bot\nmatrixhookshot_html: <b>x</b>\nmatrixhookshot_text: fixed\n"] {
             let r = rule("matrixhookshot", &format!("matrixhookshot_webhook_url: {url}\n{extra}")).unwrap();
             let rt = RuleType::new(&r).unwrap();
-            let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+            let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
             MatrixHookshot::new(&r).unwrap().alert(&v, &[json!({"a": 1}).as_object().unwrap().clone()]).await.unwrap();
         }
         let got = got.await.unwrap();

@@ -125,6 +125,11 @@ fn pretty_json(v: &Value) -> String {
 
 /// The text ElastAlert puts in every alert for one match.
 pub fn match_body(rule: &Rule, rtype: &RuleType, m: &Map<String, Value>, ts_fmt: Option<&str>) -> String {
+    match_body_in(rule, rtype, m, ts_fmt, false)
+}
+
+/// `jira_markup`: the match fields are one `{code}` JSON block (upstream's `JiraFormattedMatchString`).
+pub fn match_body_in(rule: &Rule, rtype: &RuleType, m: &Map<String, Value>, ts_fmt: Option<&str>, jira_markup: bool) -> String {
     let mut text = String::new();
     if !rule.raw.contains_key("alert_text") {
         text.push_str(&rule.name);
@@ -150,7 +155,10 @@ pub fn match_body(rule: &Rule, rtype: &RuleType, m: &Map<String, Value>, ts_fmt:
             }
             text.push('\n');
         }
-        if text_type != "exclude_fields" {
+        if text_type != "exclude_fields" && jira_markup {
+            let items: Map<String, Value> = m.iter().filter(|(k, _)| !k.starts_with("top_events_")).map(|(k, v)| (k.clone(), v.clone())).collect();
+            text.push_str(&format!("{{code}}{}{{code}}", pretty_json(&Value::Object(items))));
+        } else if text_type != "exclude_fields" {
             // serde_json maps are sorted by key, like Python's `sorted(match.items())`.
             for (k, v) in m.iter().filter(|(k, _)| !k.starts_with("top_events_")) {
                 let val = match v {
@@ -297,7 +305,7 @@ fn ascii_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> St
 }
 
 /// "Aggregation resulted in the following data..." table: count of matches per `summary_table_fields` tuple.
-fn summary_text(rule: &Rule, matches: &[Map<String, Value>], width: usize) -> String {
+pub(crate) fn summary_text(rule: &Rule, matches: &[Map<String, Value>], width: usize) -> String {
     if rule.aggregation.is_none() || !rule.raw.contains_key("summary_table_fields") {
         return String::new();
     }

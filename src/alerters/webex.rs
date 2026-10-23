@@ -53,7 +53,7 @@ mod tests {
             assert_eq!(w.url, "https://webexapis.com/v1/webhooks/incoming/abc");
             w.url = format!("{url}/hook");
             let rt = RuleType::new(&r).unwrap();
-            let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+            let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
             w.alert(&v, &[json!({"a": 1}).as_object().unwrap().clone()]).await.unwrap();
             let got = got.await.unwrap();
             assert_eq!(got[0].json(), json!({ key: "r\n\na: 1\n" }));

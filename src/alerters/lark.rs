@@ -54,7 +54,7 @@ mod tests {
         assert_eq!(l.url, "https://open.feishu.cn/open-apis/bot/v2/hook/bot1");
         l.url = format!("{url}/hook");
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         l.alert(&v, &[json!({"a": 1}).as_object().unwrap().clone()]).await.unwrap();
         assert_eq!(got.await.unwrap()[0].json(), json!({"msg_type": "text", "content": {"title": "S", "text": "r\n\na: 1\n"}}));
     }

@@ -66,6 +66,27 @@ impl Http {
         Ok(Http { client: c.build()?, basic_auth: None })
     }
 
+    /// Wraps a client built by the caller (several proxies, TLS options that do not fit the `<prefix>_` scheme).
+    pub fn from_client(client: reqwest::Client) -> Http {
+        Http { client, basic_auth: None }
+    }
+
+    /// Sends one request and returns the response whatever its status; only transport errors fail.
+    /// `what` completes "Error ...: <cause>".
+    pub async fn request(&self, method: reqwest::Method, what: &str, url: &str, headers: &[(String, String)], body: Option<&Value>) -> Result<reqwest::Response> {
+        let mut req = self.client.request(method, url);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        if let Some((u, p)) = &self.basic_auth {
+            req = req.basic_auth(u, Some(p));
+        }
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+        req.send().await.map_err(|e| anyhow::anyhow!("Error {what}: {e}"))
+    }
+
     /// Sends HTTP basic authentication with every request.
     pub fn with_basic_auth(mut self, login: String, password: String) -> Http {
         self.basic_auth = Some((login, password));

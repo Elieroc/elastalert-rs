@@ -120,7 +120,7 @@ mod tests {
         let mut d = DingTalk::new(&r).unwrap();
         d.url = format!("{url}/robot/send?access_token=t");
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let m = json!({"a": 1}).as_object().unwrap().clone();
         d.alert(&v, &[m.clone()]).await.unwrap();
         d.alert(&v, &[m]).await.unwrap();

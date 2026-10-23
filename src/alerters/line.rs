@@ -54,7 +54,7 @@ mod tests {
         let mut l = Line::new(&r).unwrap();
         l.url = format!("{url}/v2/bot/message/push");
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         l.alert(&v, &[json!({"a": 1}).as_object().unwrap().clone()]).await.unwrap();
         let got = got.await.unwrap();
         assert_eq!(got[0].header("authorization"), Some("Bearer tok"));

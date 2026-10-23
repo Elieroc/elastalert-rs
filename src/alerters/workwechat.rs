@@ -59,7 +59,7 @@ mod tests {
             assert_eq!(w.url, "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k");
             w.url = format!("{url}/send?key=k");
             let rt = RuleType::new(&r).unwrap();
-            let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+            let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
             w.alert(&v, &[json!({"a": 1}).as_object().unwrap().clone()]).await.unwrap();
             assert_eq!(got.await.unwrap()[0].json(), json!({"msgtype": kind, kind: {"content": "r\n\na: 1\n"}}));
         }

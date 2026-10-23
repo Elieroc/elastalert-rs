@@ -157,7 +157,7 @@ mod tests {
         )
         .unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let m = json!({"@timestamp": "2021-01-01T00:00:00Z", "host": "web-1"}).as_object().unwrap().clone();
         let p = Alerta::new(&r).unwrap().payload(&v, &[m], 1_700_000_000_000_000).unwrap();
         assert_eq!(p["resource"], json!("res-web-1"));
@@ -172,7 +172,7 @@ mod tests {
     fn query_key_as_resource_and_default_event() {
         let r = rule("alerta", "alerta_api_url: http://a\nquery_key: host\nalerta_use_qk_as_resource: true\nalerta_event: ''\nalerta_text: ''\n").unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let m = json!({"host": "web-1", "x": 1}).as_object().unwrap().clone();
         let a = Alerta::new(&r).unwrap();
         let p = a.payload(&v, &[m.clone()], 0).unwrap();

@@ -149,7 +149,7 @@ mod tests {
         )
         .unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let pd = PagerDuty::new(&r).unwrap();
         assert_eq!(pd.url, "https://events.pagerduty.com/generic/2010-04-15/create_event.json");
         assert_eq!(
@@ -169,7 +169,7 @@ mod tests {
         )
         .unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let pd = PagerDuty::new(&r).unwrap();
         assert_eq!(pd.url, "https://events.pagerduty.com/v2/enqueue");
         assert_eq!(
@@ -193,7 +193,7 @@ mod tests {
         let (url, got) = capture(1, 200).await;
         let r = rule("pagerduty", "pagerduty_service_key: svc\npagerduty_client_name: C\n").unwrap();
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let mut pd = PagerDuty::new(&r).unwrap();
         pd.url = format!("{url}/generic/2010-04-15/create_event.json");
         pd.alert(&v, &[m()]).await.unwrap();

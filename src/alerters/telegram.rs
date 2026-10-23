@@ -89,7 +89,7 @@ mod tests {
         let mut t = Telegram::new(&r).unwrap();
         t.url = format!("{url}/botabc/sendMessage");
         let rt = RuleType::new(&r).unwrap();
-        let v = View { rule: &r, rtype: &rt, ts_fmt: None };
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
         let m = json!({"a": 1}).as_object().unwrap().clone();
         t.alert(&v, &[m.clone(), m]).await.unwrap();
         let got = got.await.unwrap();
