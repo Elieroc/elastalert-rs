@@ -72,12 +72,11 @@ Alerter post / http_post (payload map static payload headers proxy ca),alerter,m
 Alerter command (list or shell string; pipe_match_json; pipe_alert_text),alerter,must,yes,yes,"argv / shell string, field substitution, pipe_match_json, pipe_alert_text, fail_on_non_zero_exit"
 Alerter debug,alerter,must,yes,yes,
 Alerter post2 / mattermost / ms_power_automate / discord / telegram / googlechat / rocketchat / webex_webhook / matrixhookshot,alerter,could,yes,yes,"lot 1: unit tests on payloads; 7 of 9 also run against sink.py (telegram and webex use fixed HTTPS URLs: unit tests only)"
-Alerter pagerduty / opsgenie / victorops / pagertree / alertmanager / flashduty,alerter,could,yes,no,
+Alerter pagerduty / opsgenie / victorops / pagertree / alertmanager / flashduty / alerta / datadog / zabbix,alerter,could,yes,yes,"lot 3: unit tests on payloads; pagerduty NTLM proxy rejected; zabbix trapper tested against a fake server; opsgenie / pagertree / alertmanager / alerta / datadog also run against sink.py"
 Alerter jira (ticket id passed to email via pipeline),alerter,could,yes,no,big (21KB)
-Alerter thehive / iris / servicenow / zabbix / datadog / gelf / indexer,alerter,could,yes,no,SOC-relevant: thehive iris indexer gelf
+Alerter thehive / iris / servicenow / gelf / indexer,alerter,could,yes,no,SOC-relevant: thehive iris indexer gelf
 Alerter sns / sqs / ses / stomp / twilio / exotel / smseagle / tencent sms,alerter,could,yes,no,
 Alerter gitter / chatwork / line / lark / dingtalk / workwechat / yzj,alerter,could,yes,yes,"lot 2: unit tests on payloads (dingtalk signature checked against Python); fixed-URL services are unit-tested only"
-Alerter alerta,alerter,could,yes,no,
 Alert pipeline shared dict between alerters; alerts_order jira before email,alerting,could,yes,no,
 Writeback indices: elastalert elastalert_status elastalert_error silence past_elastalert (ES 7 and 8 mappings),writeback,must,yes,yes,5 indices created with upstream ES 8 mappings (also used on 7)
 create_index CLI (elastalert-create-index),writeback,should,yes,yes,`elastalert create-index [--index --old-index --recreate]`; ES conn from config

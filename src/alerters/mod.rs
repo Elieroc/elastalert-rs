@@ -1,11 +1,15 @@
 //! Alerters. Each is built once per rule from its keys; one submodule per alerter or family.
 
+mod alerta;
+mod alertmanager;
 mod chatwork;
 mod command;
 mod crypto;
+mod datadog;
 mod dingtalk;
 mod discord;
 mod email;
+mod flashduty;
 mod gitter;
 mod googlechat;
 pub mod http;
@@ -13,15 +17,20 @@ mod lark;
 mod line;
 mod matrixhookshot;
 mod mattermost;
+mod opsgenie;
+mod pagerduty;
+mod pagertree;
 mod post;
 mod post2;
 mod power_automate;
 mod rocketchat;
 mod slack;
 mod telegram;
+mod victorops;
 mod webex;
 mod workwechat;
 mod yzj;
+mod zabbix;
 
 pub use email::{mailbox, read_account_file, send_mail};
 
@@ -57,6 +66,15 @@ pub enum Alerter {
     Line(line::Line),
     WorkWechat(workwechat::WorkWechat),
     Yzj(yzj::Yzj),
+    Alerta(alerta::Alerta),
+    Alertmanager(alertmanager::Alertmanager),
+    Datadog(datadog::Datadog),
+    Flashduty(flashduty::Flashduty),
+    OpsGenie(opsgenie::OpsGenie),
+    PagerDuty(pagerduty::PagerDuty),
+    PagerTree(pagertree::PagerTree),
+    VictorOps(victorops::VictorOps),
+    Zabbix(zabbix::Zabbix),
 }
 
 /// Read-only view the alerters need to produce text.
@@ -92,6 +110,15 @@ impl Alerter {
             "line" => Alerter::Line(line::Line::new(rule)?),
             "workwechat" => Alerter::WorkWechat(workwechat::WorkWechat::new(rule)?),
             "yzj" => Alerter::Yzj(yzj::Yzj::new(rule)?),
+            "alerta" => Alerter::Alerta(alerta::Alerta::new(rule)?),
+            "alertmanager" => Alerter::Alertmanager(alertmanager::Alertmanager::new(rule)?),
+            "datadog" => Alerter::Datadog(datadog::Datadog::new(rule)?),
+            "flashduty" => Alerter::Flashduty(flashduty::Flashduty::new(rule)?),
+            "opsgenie" => Alerter::OpsGenie(opsgenie::OpsGenie::new(rule)?),
+            "pagerduty" => Alerter::PagerDuty(pagerduty::PagerDuty::new(rule)?),
+            "pagertree" => Alerter::PagerTree(pagertree::PagerTree::new(rule)?),
+            "victorops" => Alerter::VictorOps(victorops::VictorOps::new(rule)?),
+            "zabbix" => Alerter::Zabbix(zabbix::Zabbix::new(rule)?),
             other => bail!("alerter '{other}' is not supported yet"),
         })
     }
@@ -119,6 +146,15 @@ impl Alerter {
             Alerter::Line(_) => "line",
             Alerter::WorkWechat(_) => "workwechat",
             Alerter::Yzj(_) => "yzj",
+            Alerter::Alerta(_) => "alerta",
+            Alerter::Alertmanager(_) => "alertmanager",
+            Alerter::Datadog(_) => "datadog",
+            Alerter::Flashduty(_) => "flashduty",
+            Alerter::OpsGenie(_) => "opsgenie",
+            Alerter::PagerDuty(_) => "pagerduty",
+            Alerter::PagerTree(_) => "pagertree",
+            Alerter::VictorOps(_) => "victorops",
+            Alerter::Zabbix(_) => "zabbix",
         }
     }
 
@@ -146,6 +182,15 @@ impl Alerter {
             Alerter::Line(a) => a.info(),
             Alerter::WorkWechat(a) => a.info(),
             Alerter::Yzj(a) => a.info(),
+            Alerter::Alerta(a) => a.info(),
+            Alerter::Alertmanager(a) => a.info(),
+            Alerter::Datadog(a) => a.info(),
+            Alerter::Flashduty(a) => a.info(),
+            Alerter::OpsGenie(a) => a.info(),
+            Alerter::PagerDuty(a) => a.info(),
+            Alerter::PagerTree(a) => a.info(),
+            Alerter::VictorOps(a) => a.info(),
+            Alerter::Zabbix(a) => a.info(),
         }
     }
 
@@ -182,6 +227,15 @@ impl Alerter {
             Alerter::Line(a) => a.alert(v, matches).await,
             Alerter::WorkWechat(a) => a.alert(v, matches).await,
             Alerter::Yzj(a) => a.alert(v, matches).await,
+            Alerter::Alerta(a) => a.alert(v, matches).await,
+            Alerter::Alertmanager(a) => a.alert(v, matches).await,
+            Alerter::Datadog(a) => a.alert(v, matches).await,
+            Alerter::Flashduty(a) => a.alert(v, matches).await,
+            Alerter::OpsGenie(a) => a.alert(v, matches).await,
+            Alerter::PagerDuty(a) => a.alert(v, matches).await,
+            Alerter::PagerTree(a) => a.alert(v, matches).await,
+            Alerter::VictorOps(a) => a.alert(v, matches).await,
+            Alerter::Zabbix(a) => a.alert(v, matches).await,
         }
     }
 }
@@ -234,6 +288,23 @@ fn discover_url<'a>(matches: &'a [Doc], kind: &str) -> Option<&'a Value> {
     lookup(&matches[0], &format!("{kind}_discover_url")).filter(|u| truthy(Some(u)))
 }
 
+/// `template.format(*values)` where each value is the match field named in `args`, else the rule option of that name, else `missing`.
+fn format_with_args(rule: &Rule, template: &str, args: &[Value], m: &Doc, missing: &str) -> String {
+    let values: Vec<String> = args
+        .iter()
+        .map(|a| {
+            let name = py_str(a);
+            let found = lookup(m, &name).filter(|v| !v.is_null()).or_else(|| rule.raw.get(&name).filter(|v| truthy(Some(v))));
+            found.map(py_str).unwrap_or_else(|| missing.to_string())
+        })
+        .collect();
+    alert::py_format(template, &values, &Map::new())
+}
+
+fn missing_text(rule: &Rule) -> &str {
+    rule.raw.get("alert_missing_value").and_then(Value::as_str).unwrap_or("<MISSING VALUE>")
+}
+
 fn required(rule: &Rule, kind: &str, key: &str) -> Result<()> {
     if !rule.raw.contains_key(key) {
         bail!("alerter {kind} needs the option {key}");
@@ -243,7 +314,12 @@ fn required(rule: &Rule, kind: &str, key: &str) -> Result<()> {
 
 /// Replaces `%(name)s`, `{name}` and `{match[name]}` with values from the match (dotted keys work).
 pub fn resolve_string(text: &str, m: &Doc) -> String {
-    let get = |name: &str| lookup(m, name).map(py_str).unwrap_or_else(|| "<MISSING VALUE>".into());
+    resolve_string_with(text, m, "<MISSING VALUE>")
+}
+
+/// `resolve_string` with the rule's `alert_missing_value` as the text for unknown fields.
+pub fn resolve_string_with(text: &str, m: &Doc, missing: &str) -> String {
+    let get = |name: &str| lookup(m, name).map(py_str).unwrap_or_else(|| missing.to_string());
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(pos) = rest.find(['%', '{', '}']) {

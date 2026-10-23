@@ -14,6 +14,7 @@ enum Body<'a> {
 
 pub struct Http {
     client: reqwest::Client,
+    basic_auth: Option<(String, String)>,
 }
 
 impl Http {
@@ -44,7 +45,31 @@ impl Http {
         if b(rule, &key("ignore_ssl_errors")) {
             c = c.danger_accept_invalid_certs(true);
         }
-        Ok(Http { client: c.build()? })
+        Ok(Http { client: c.build()?, basic_auth: None })
+    }
+
+    /// For alerters whose option names do not follow the `<prefix>_...` scheme (e.g. `alerta_timeout` is not an HTTP timeout).
+    pub fn raw(proxy: Option<&str>, ca_certs: Option<&str>, ignore_ssl_errors: bool, timeout: u64) -> Result<Http> {
+        let mut c = reqwest::Client::builder().timeout(Duration::from_secs(timeout.max(1)));
+        if let Some(p) = proxy {
+            c = c.proxy(reqwest::Proxy::https(p)?);
+        }
+        if let Some(ca) = ca_certs {
+            let pem = std::fs::read(ca).with_context(|| format!("reading CA file {ca}"))?;
+            for cert in reqwest::Certificate::from_pem_bundle(&pem)? {
+                c = c.add_root_certificate(cert);
+            }
+        }
+        if ignore_ssl_errors {
+            c = c.danger_accept_invalid_certs(true);
+        }
+        Ok(Http { client: c.build()?, basic_auth: None })
+    }
+
+    /// Sends HTTP basic authentication with every request.
+    pub fn with_basic_auth(mut self, login: String, password: String) -> Http {
+        self.basic_auth = Some((login, password));
+        self
     }
 
     /// POSTs `body` as JSON; any HTTP error status is an error. `what` completes "Error posting ...".
@@ -84,6 +109,10 @@ impl Http {
         let req = match body {
             Body::Json(v) => self.client.post(url).json(v),
             Body::Form(s) => self.client.post(url).header("Content-Type", "application/x-www-form-urlencoded").body(s),
+        };
+        let req = match &self.basic_auth {
+            Some((u, p)) => req.basic_auth(u, Some(p)),
+            None => req,
         };
         let resp = req.headers(map).send().await.map_err(|e| fail(e, ""))?;
         if let Err(e) = resp.error_for_status_ref() {

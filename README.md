@@ -218,7 +218,7 @@ Options not listed anywhere are ignored, as in ElastAlert 2, so typos are not de
 
 ### Alerters
 
-ElastAlert 2 has 44 alerters. **21 are ported** (`debug`, `email`, `slack`, `post`, `command`, and the sixteen chat webhooks below); a rule naming any other alerter is rejected.
+ElastAlert 2 has 44 alerters. **30 are ported** (`debug`, `email`, `slack`, `post`, `command`, the sixteen chat webhooks and the nine on-call / incident alerters below); a rule naming any other alerter is rejected.
 
 | Alerter | Status |
 | --- | --- |
@@ -243,7 +243,15 @@ ElastAlert 2 has 44 alerters. **21 are ported** (`debug`, `email`, `slack`, `pos
 | `dingtalk` | supported: `text`, `markdown`, `single_action_card`, `action_card`, `dingtalk_sign` secret, proxy with login. Another `dingtalk_msgtype` is rejected at load (upstream fails at send time). The signature is computed for every alert; upstream appends a second `timestamp`/`sign` to its stored URL on each alert |
 | `workwechat` | supported: `work_wechat_bot_id`, `work_wechat_msgtype` `text` or `markdown` (other values rejected at load) |
 | `yzj` | supported: `yzj_token`, `yzj_type`, `yzj_custom_loc`, proxy |
-| `pagerduty`, `opsgenie`, `victorops`, `pagertree`, `alertmanager`, `flashduty`, `alerta`, `zabbix`, `datadog` | **not ported** |
+| `pagerduty` | supported: Events API v1 and v2 (`pagerduty_api_version`), `pagerduty_incident_key` with `_args`, all `pagerduty_v2_payload_*` options, proxy, CA file, ignore SSL errors, `pagerduty_event_type`. **Not**: NTLM proxy authentication (`pagerduty_proxy_login` / `pagerduty_proxy_pass` are rejected at load) |
+| `opsgenie` | supported: `opsgenie_key`, account, recipients / teams with `_args` and defaults, tags, message / subject (+ `_args`), description, entity, source, alias, priority, `opsgenie_details`, `opsgenie_addr`, proxy. `.format(**match)` options fail like upstream when a field is missing (`KeyError`); only `{name}` and `{name[key]}` references are understood |
+| `victorops` | supported: API key, routing key, message type, entity id / display name, proxy. The entity display name is computed per alert (upstream keeps the first one for the life of the alerter) |
+| `pagertree` | supported: `pagertree_integration_url`, proxy |
+| `alertmanager` | supported: several hosts, API version, alertname, Jinja `alertmanager_labels` / `alertmanager_annotations`, `alertmanager_fields`, label names for title and body, `alertmanager_resolve_time`, `jinja_root_name`, basic auth, proxy, CA file, timeout, ignore SSL errors |
+| `flashduty` | supported: all `flashduty_*` options |
+| `alerta` | supported: all `alerta_*` options, including `alerta_use_match_timestamp` and `alerta_use_qk_as_resource` (applied per alert; upstream overwrites its stored resource the first time). `createTime` is UTC (upstream uses the local clock labelled `Z`) |
+| `datadog` | supported: API / app keys, `datadog_api_url` |
+| `zabbix` | supported: `zbx_host`, `zbx_key`, `zbx_host_from_field`, `zbx_sender_host`, `zbx_sender_port`, `timestamp_strptime`; native trapper protocol, no TLS (`zbx_sender` without PSK/cert). A server-side failed item only logs a warning, as upstream |
 | `jira`, `servicenow`, `hivealerter` (TheHive), `iris`, `gelf`, `indexer` | **not ported** |
 | `sns`, `sqs`, `ses`, `stomp`, `twilio`, `exotel`, `smseagle`, `tencent_sms` | **not ported** |
 | custom Python alerters | **not possible** |
@@ -268,7 +276,7 @@ Each alerter has its own delivery state: if Slack is down and email works, only 
 
 **Not covered** (summary; details in the tables above)
 
-- 23 of 44 alerters, notably PagerDuty, Opsgenie, Jira, TheHive, SNS/SES, Zabbix.
+- 14 of 44 alerters, notably Jira, TheHive, SNS/SES.
 - Python match enhancements (Rust modules instead, see [docs/enhancements.md](docs/enhancements.md)) and custom `jinja_filters`.
 - `notify_alert` (error notifications through alerters), statsd, AWS SigV4 signing, `replace_dots_in_field_names`.
 - Per-rule Elasticsearch connections, Python plugins of any kind (rule types, alerters, loaders, enhancements, filters), Python `logging:` config.
