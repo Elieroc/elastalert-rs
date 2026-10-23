@@ -1,0 +1,11 @@
+name: any eve failures
+type: any
+index: logs-parity
+filter:
+- term:
+    user.name: eve
+- term:
+    event.outcome: failure
+realert:
+  minutes: 0
+alert: debug

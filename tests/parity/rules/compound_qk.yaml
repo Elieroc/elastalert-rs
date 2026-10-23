@@ -1,0 +1,17 @@
+name: compound key
+type: frequency
+index: logs-parity
+num_events: 3
+timeframe:
+  minutes: 1
+query_key: [user.name, host]
+filter:
+- term:
+    event.outcome: failure
+alert_text: "{user} on {host}"
+alert_text_kw:
+  user.name: user
+  host: host
+realert:
+  minutes: 0
+alert: debug

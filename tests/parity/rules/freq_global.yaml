@@ -1,0 +1,11 @@
+name: global failure burst
+type: frequency
+index: logs-parity
+num_events: 20
+timeframe:
+  minutes: 10
+filter:
+- query:
+    query_string:
+      query: "event.outcome:failure"
+alert: debug

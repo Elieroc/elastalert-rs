@@ -1,0 +1,5 @@
+elastalert-rs is an independent Rust reimplementation of the behaviour of
+ElastAlert 2 (https://github.com/jertel/elastalert2), Copyright Yelp and the
+ElastAlert 2 contributors, licensed under the Apache License 2.0.
+Rule files, configuration keys, log lines and writeback document formats are
+kept compatible with ElastAlert 2 on purpose.

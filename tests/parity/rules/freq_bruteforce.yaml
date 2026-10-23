@@ -1,0 +1,16 @@
+name: frequency brute force per user
+type: frequency
+index: logs-parity
+num_events: 5
+timeframe:
+  minutes: 2
+query_key: user.name
+filter:
+- term:
+    event.outcome: failure
+alert_text: "User {} failed {} logins (host {}, missing {})"
+alert_text_args: [user.name, num_events, host, nope.field]
+alert_text_type: alert_text_only
+realert:
+  minutes: 0
+alert: debug
