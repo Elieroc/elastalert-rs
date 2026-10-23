@@ -1,0 +1,6 @@
+target
+.git
+replica
+bench
+tests
+*.log

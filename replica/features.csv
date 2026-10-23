@@ -38,7 +38,7 @@ Per-rule scheduler with run_every jitter and random first-run offset (0-15s),sch
 Internal jobs: pending-alerts + config-change every run_every,scheduler,must,yes,yes,config reload + silence refresh in the main loop; pending retries run at the start of each rule run; no apscheduler
 limit_execution (cron) + limit_execution_coverage,scheduler,could,yes,no,
 --start NOW / ISO and --end (single run then exit),cli,must,yes,yes,
---rule single rule; --debug; --verbose; --config; --patience; --pin_rules; --es_debug; --es_debug_trace,cli,must,yes,partial,--es_debug and --es_debug_trace missing
+--rule single rule; --debug; --verbose; --config; --patience; --pin_rules; --es_debug; --es_debug_trace,cli,must,yes,yes,--es_debug logs requests; --es_debug_trace appends curl commands + responses to a file
 --silence unit=n [--silence_qk_value],cli,must,yes,yes,
 SIGINT clean exit,cli,must,yes,yes,graceful: finish runs + flush writeback (SIGTERM too)
 rule type any,rule type,must,yes,yes,parity-tested
@@ -81,7 +81,7 @@ Alert pipeline shared dict between alerters; alerts_order jira before email,aler
 Writeback indices: elastalert elastalert_status elastalert_error silence past_elastalert (ES 7 and 8 mappings),writeback,must,yes,yes,5 indices created with upstream ES 8 mappings (also used on 7)
 create_index CLI (elastalert-create-index),writeback,should,yes,yes,`elastalert create-index [--index --old-index --recreate]`; ES conn from config
 replace_dots_in_field_names,writeback,could,yes,no,
-Error handling: writeback error doc; disable_rules_on_error; notify_email / notify_alert / notify_all_errors,errors,must,yes,partial,error docs and logs; no notify_email / notify_alert / disable_rules_on_error
+Error handling: writeback error doc; disable_rules_on_error; notify_email / notify_alert / notify_all_errors,errors,must,yes,partial,"error docs and logs; disable_rules_on_error (panics only, rule parked until reload/restart); no notify_email / notify_alert / notify_all_errors"
 test_rule CLI (--schema-only --days --start --end --data --alert --save-json --use-downloaded --max-query-size --count-only --formatted-output --stop-error),cli,should,yes,yes,"`elastalert test-rule`: schema-only, days/start/end, data, alert, save-json, use-downloaded, max-query-size, count-only, formatted-output, stop-error; output text not byte-identical to upstream"
 Kibana discover URL (generate_kibana_discover_url etc.),integration,could,yes,no,
 OpenSearch discover URL,integration,could,yes,no,
@@ -89,10 +89,12 @@ EQL and ES|QL rule queries,query,could,yes,no,eql.py esql.py
 Prometheus metrics endpoint (--prometheus_port),observability,should,yes,yes,`--prometheus_port/--prometheus_addr`; same metric names (_total suffix)
 statsd metrics (rule.time_taken query.hits already_seen.hits query.matches query.alerts_sent),observability,could,yes,no,
 Logging config (dictConfig) -> tracing,observability,should,yes,no,
-Docker image + Helm chart,packaging,could,yes,no,
+Docker image + Helm chart,packaging,could,yes,yes,"Dockerfile (multi-stage, debian-slim, non-root, ~140 MB); Helm chart not done"
 Existing rules/*.yaml from SOC run unchanged,compat,must,yes,partial,"12 rule types supported minus metric/percentage/spike_aggregation; aggregation, count/terms queries, top_count_keys rejected with a clear error"
 Their docs site and community,project,skip,yes,skip,not part of the product; keep license notice and credit upstream
 Python plugin ecosystem (third-party rule/alerter modules),project,skip,yes,skip,
 "ingest_timestamp_field: query by ingest time, no buffer_time overlap (new, W3)",performance,should,no,yes,"verified: late document (old event time, new ingest time) found once in the next window"
 `elastalert validate`: load config + all rules + alerter options without ES (new),cli,should,no,yes,500 rules in 0.02 s
 "Point in time + search_after paging (new, W4)",performance,should,no,yes,replaces recursive scroll; falls back to scroll
+add_metadata_alert (category description owner priority in alert docs),alerting,could,yes,yes,tested
+Per-rule Elasticsearch connection (es_host etc. inside a rule),es client,could,yes,no,rejected at load unless identical to config.yaml

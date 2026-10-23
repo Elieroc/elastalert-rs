@@ -432,6 +432,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "croner",
+ "futures-util",
  "iana-time-zone",
  "lettre",
  "log",

@@ -310,6 +310,8 @@ async fn run_rule(
         silences: Arc::new(Silences::default()),
         metrics: Arc::new(Metrics::default()),
         debug: !args.alert,
+        disabled: Default::default(),
+        disable_rules_on_error: false,
         run_every: conf.run_every,
         use_pit: conf.raw.get("use_pit").and_then(Value::as_bool).unwrap_or(true),
         old_query_limit: conf.old_query_limit,

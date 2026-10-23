@@ -119,3 +119,14 @@ Python's figure is a snapshot while it was still running its first rules; treat 
 
 metric_aggregation, percentage_match, spike_aggregation (aggregation queries), `limit_execution`, `notify_email` / `notify_alert` / `disable_rules_on_error`, `--es_debug(_trace)`,
 summary_table_type html, `_source_enabled: false`, SigV4, statsd, Kibana/OpenSearch discover links, the other ~40 alerters, TLS/client-cert paths (still untested), HA lease.
+
+## Milestone 4 (2026-10-23)
+
+| area | status | notes |
+| --- | --- | --- |
+| `disable_rules_on_error` | done | only panics count as "uncaught" (upstream: non-EAException). Error doc written, rule parked until its file changes or restart, others keep running. Verified with an injected panic (patch removed afterwards): disabled, parked, reload retried it; with `false` it keeps running and fails each run. No notification (`notify_email` still missing) |
+| `--es_debug`, `--es_debug_trace` | done | request lines `INFO:elasticsearch:...`; trace file with curl command, status, time, response (4 KB cap). Credentials never appear |
+| Dockerfile | done | multi-stage (rust:1-bookworm -> debian:bookworm-slim), dependency layer cache, non-root uid 10001, 142 MB. Tested in a container against the host ES: validate, create-index, replay of the 23 parity rules = 730 alerts |
+| `add_metadata_alert` | done | tested |
+| load-time rejections added | done | `generate_kibana_discover_url`, `generate_opensearch_discover_url`, `match_enhancements`, `jinja_filters`, `include_rule_params_in_matches`, `_source_enabled: false`, and per-rule `es_host`/credentials/TLS options that differ from config.yaml. Before this they were silently ignored |
+| README.md | done | coverage tables for config keys, rule types, rule options, alerters, differences, tests, measurements |

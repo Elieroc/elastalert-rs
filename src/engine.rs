@@ -53,6 +53,9 @@ pub struct Ctx {
     pub silences: Arc<Silences>,
     pub metrics: Arc<Metrics>,
     pub debug: bool,
+    /// Rules disabled after a panic (`disable_rules_on_error`); shown in the log, cleared on reload.
+    pub disabled: Arc<Mutex<Vec<String>>>,
+    pub disable_rules_on_error: bool,
     pub use_pit: bool,
     /// Global `run_every`: count and terms queries read this much per query.
     pub run_every: Dur,
@@ -762,6 +765,17 @@ impl RuleState {
         all
     }
 
+    /// `add_metadata_alert`: category, description, owner and priority of the rule go into the alert doc.
+    fn add_metadata(&self, doc: &mut Doc) {
+        if self.rule.raw.get("add_metadata_alert").and_then(Value::as_bool).unwrap_or(false) {
+            let text = |k: &str, d: &str| self.rule.raw.get(k).map_or_else(|| d.to_string(), py_str);
+            doc.insert("category".into(), json!(text("category", "")));
+            doc.insert("description".into(), json!(text("description", "")));
+            doc.insert("owner".into(), json!(text("owner", "")));
+            doc.insert("priority".into(), json!(text("priority", "2")));
+        }
+    }
+
     /// Writes the alert doc(s) for `p`: one per match, same `_id` every time so updates overwrite.
     /// An aggregated alert is one doc (the first match); the other matches' docs are deleted once it is fully sent.
     async fn write_alert(&self, ctx: &Ctx, p: &mut Pending) {
@@ -785,6 +799,7 @@ impl RuleState {
             if !complete {
                 doc.insert("alert_exception".into(), json!(p.exception));
             }
+            self.add_metadata(&mut doc);
             doc.insert("match_body".into(), Value::Object(m.clone()));
             let id = if n == 0 { p.id.clone() } else { Writeback::new_id() };
             ctx.writeback.write_id(Wb::Alert, &id, doc).await;
@@ -923,6 +938,7 @@ impl RuleState {
         if let Some(h) = head_id {
             doc.insert("aggregate_id".into(), json!(h));
         }
+        self.add_metadata(&mut doc);
         doc.insert("match_body".into(), Value::Object(m));
         if !ctx.debug {
             ctx.writeback.write_id(Wb::Alert, &id, doc).await;

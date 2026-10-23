@@ -192,6 +192,18 @@ fn str_list(v: &Value) -> Vec<String> {
 
 pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     let (mut raw, _) = load_yaml(file)?;
+    // Every rule uses the daemon's Elasticsearch connection; a rule that names a different one would
+    // silently query the wrong cluster, so refuse it.
+    for k in [
+        "es_host", "es_hosts", "es_port", "es_username", "es_password", "es_bearer", "es_api_key", "es_url_prefix", "use_ssl", "verify_certs", "ca_certs", "client_cert",
+        "client_key",
+    ] {
+        if let Some(v) = raw.get(k)
+            && conf.raw.get(k) != Some(v)
+        {
+            bail!("per-rule Elasticsearch connection ({k}) is not supported: set it in config.yaml");
+        }
+    }
     for (k, v) in &conf.raw {
         raw.entry(k.clone()).or_insert_with(|| v.clone());
     }
@@ -215,7 +227,14 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         Some("cardinality") => Kind::Cardinality,
         other => bail!("rule type {other:?} is not supported yet"),
     };
-    for unsupported in ["limit_execution"] {
+    for unsupported in [
+        "limit_execution",
+        "generate_kibana_discover_url",
+        "generate_opensearch_discover_url",
+        "match_enhancements",
+        "jinja_filters",
+        "include_rule_params_in_matches",
+    ] {
         if raw.get(unsupported).is_some_and(|v| !matches!(v, Value::Bool(false) | Value::Null)) {
             bail!("option {unsupported} is not supported yet");
         }
@@ -232,6 +251,9 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     };
     if raw.get("summary_table_type").and_then(Value::as_str) == Some("html") {
         bail!("summary_table_type html is not supported yet (ascii and markdown are)");
+    }
+    if raw.get("_source_enabled").and_then(Value::as_bool) == Some(false) {
+        bail!("option _source_enabled: false is not supported yet");
     }
     let use_count_query = raw.get("use_count_query").and_then(Value::as_bool).unwrap_or(false);
     let use_terms_query = raw.get("use_terms_query").and_then(Value::as_bool).unwrap_or(false);

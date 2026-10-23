@@ -16,8 +16,16 @@ pub struct Caps {
     pub opensearch: bool,
 }
 
+/// `--es_debug` (log every request) and `--es_debug_trace` (curl commands in a file).
+#[derive(Default)]
+pub struct Tracing {
+    log: bool,
+    file: Option<std::sync::Mutex<std::fs::File>>,
+}
+
 #[derive(Clone)]
 pub struct Es {
+    tracing: Arc<Tracing>,
     caps: Arc<tokio::sync::OnceCell<Caps>>,
     http: reqwest::Client,
     bases: Arc<Vec<String>>,
@@ -113,7 +121,41 @@ impl Es {
             }
             b = b.identity(reqwest::Identity::from_pem(&pem)?);
         }
-        Ok(Es { caps: Arc::new(tokio::sync::OnceCell::new()), http: b.build()?, bases: Arc::new(bases), current: Arc::new(AtomicUsize::new(0)) })
+        Ok(Es { tracing: Arc::default(), caps: Arc::new(tokio::sync::OnceCell::new()), http: b.build()?, bases: Arc::new(bases), current: Arc::new(AtomicUsize::new(0)) })
+    }
+
+    /// Turns on request logging (`log`) and/or a curl-style trace file (appended to).
+    pub fn with_tracing(mut self, log: bool, trace_file: Option<&std::path::Path>) -> Result<Es> {
+        let file = trace_file
+            .map(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).with_context(|| format!("opening es_debug_trace file {}", p.display())).map(std::sync::Mutex::new))
+            .transpose()?;
+        self.tracing = Arc::new(Tracing { log, file });
+        Ok(self)
+    }
+
+    fn trace(&self, method: &Method, url: &str, body: &Body<'_>, status: Option<u16>, secs: f64, response: &str) {
+        if self.tracing.log {
+            match status {
+                Some(s) => log::info!(target: "elasticsearch", "{method} {url} [status:{s} request:{secs:.3}s]"),
+                None => log::info!(target: "elasticsearch", "{method} {url} [failed request:{secs:.3}s]"),
+            }
+        }
+        if let Some(f) = &self.tracing.file {
+            use std::io::Write;
+            let data = match body {
+                Body::None => String::new(),
+                Body::Json(v) => format!(" -d '{}'", v.to_string().replace('\'', "'\\''")),
+                Body::Ndjson(s) => format!(" --data-binary '{}'", s.replace('\'', "'\\''")),
+            };
+            let ctype = if matches!(body, Body::Ndjson(_)) { "application/x-ndjson" } else { "application/json" };
+            let shown: String = response.chars().take(4096).collect();
+            let more = if response.chars().count() > 4096 { " ...(truncated)" } else { "" };
+            let _ = writeln!(
+                f.lock().unwrap(),
+                "curl -H 'Content-Type: {ctype}' -X{method} '{url}'{data}\n#[{}] ({secs:.3}s)\n#{shown}{more}\n",
+                status.map_or("failed".to_string(), |s| s.to_string())
+            );
+        }
     }
 
     /// Sends a request, trying every host once on connection-level failures.
@@ -130,11 +172,20 @@ impl Es {
                 Body::Json(v) => req.json(v),
                 Body::Ndjson(s) => req.header(CONTENT_TYPE, "application/x-ndjson").body((*s).to_string()),
             };
-            match req.send().await {
+            let started = std::time::Instant::now();
+            let traced = self.tracing.log || self.tracing.file.is_some();
+            let sent = req.send().await;
+            if traced && let Err(e) = &sent {
+                self.trace(&method, &format!("{}/{}", self.bases[idx], path.trim_start_matches('/')), &body, None, started.elapsed().as_secs_f64(), &e.to_string());
+            }
+            match sent {
                 Ok(resp) => {
                     self.current.store(idx, Ordering::Relaxed);
                     let status = resp.status();
                     let text = resp.text().await?;
+                    if traced {
+                        self.trace(&method, &format!("{}/{}", self.bases[idx], path.trim_start_matches('/')), &body, Some(status.as_u16()), started.elapsed().as_secs_f64(), &text);
+                    }
                     if !status.is_success() {
                         bail!("HTTP {status}: {}", clip(&text));
                     }

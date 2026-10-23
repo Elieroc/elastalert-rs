@@ -14,6 +14,7 @@ mod types;
 mod writeback;
 
 use anyhow::{Context, Result, bail};
+use futures_util::FutureExt;
 use clap::{Parser, Subcommand};
 use config::Config;
 use engine::{Ctx, Pending, RuleState, Silences};
@@ -66,6 +67,12 @@ struct Args {
     /// Do not reload rule files when they change
     #[arg(long = "pin_rules")]
     pin_rules: bool,
+    /// Log every request sent to Elasticsearch
+    #[arg(long = "es_debug")]
+    es_debug: bool,
+    /// Append every Elasticsearch request, as a curl command with its response, to this file
+    #[arg(long = "es_debug_trace", value_name = "FILE")]
+    es_debug_trace: Option<PathBuf>,
     /// Serve Prometheus metrics on this port
     #[arg(long = "prometheus_port")]
     prometheus_port: Option<u16>,
@@ -96,15 +103,16 @@ enum Cmd {
     Validate,
 }
 
-struct Logger;
+struct Logger(log::LevelFilter);
 
 impl log::Log for Logger {
     fn enabled(&self, m: &log::Metadata) -> bool {
-        m.level() <= log::max_level()
+        m.level() <= self.0 || (m.target() == "elasticsearch" && m.level() <= log::max_level())
     }
     fn log(&self, r: &log::Record) {
         if self.enabled(r.metadata()) {
-            eprintln!("{}:elastalert:{}", r.level().as_str().replace("WARN", "WARNING"), r.args());
+            let name = if r.target() == "elasticsearch" { "elasticsearch" } else { "elastalert" };
+            eprintln!("{}:{name}:{}", r.level().as_str().replace("WARN", "WARNING"), r.args());
         }
     }
     fn flush(&self) {}
@@ -234,9 +242,28 @@ async fn rule_task(
         {
             let _permit = sem.acquire().await;
             let end = now() - st.rule.query_delay;
-            if let Err(e) = st.run(&ctx, end, initial.take()).await {
-                ctx.metrics.error();
-                ctx.writeback.error(format!("Error running rule {}: {e:#}", st.rule.name), json!({"rule": st.rule.name})).await;
+            let outcome = std::panic::AssertUnwindSafe(st.run(&ctx, end, initial.take())).catch_unwind().await;
+            match outcome {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    ctx.metrics.error();
+                    ctx.writeback.error(format!("Error running rule {}: {e:#}", st.rule.name), json!({"rule": st.rule.name})).await;
+                }
+                Err(panic) => {
+                    // A bug, not a data or connection problem: upstream calls this an uncaught exception.
+                    ctx.metrics.error();
+                    let msg = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into());
+                    ctx.writeback.error(format!("Uncaught exception running rule {}: {msg}", st.rule.name), json!({"rule": st.rule.name})).await;
+                    if ctx.disable_rules_on_error {
+                        drop(_permit);
+                        ctx.disabled.lock().unwrap().push(st.rule.name.clone());
+                        log::info!("Rule {} disabled", st.rule.name);
+                        // Parked until the rule file changes (reload stops this task) or the daemon restarts.
+                        let _ = stop.changed().await;
+                        ctx.disabled.lock().unwrap().retain(|n| *n != st.rule.name);
+                        return st;
+                    }
+                }
             }
         }
         st.forget_old_hits();
@@ -384,19 +411,18 @@ impl Runtime {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let level = if args.debug || args.verbose { log::LevelFilter::Info } else { log::LevelFilter::Warn };
-    log::set_logger(Box::leak(Box::new(Logger))).expect("logger set once");
-    log::set_max_level(level);
+    let level = if args.debug || args.verbose || matches!(args.cmd, Some(Cmd::TestRule(_))) { log::LevelFilter::Info } else { log::LevelFilter::Warn };
+    log::set_logger(Box::leak(Box::new(Logger(level)))).expect("logger set once");
+    log::set_max_level(if args.es_debug { log::LevelFilter::Info } else { level });
 
     if let Some(Cmd::TestRule(t)) = args.cmd {
-        log::set_max_level(log::LevelFilter::Info);
         return testrule::run(t, &args.config).await;
     }
     let conf = Config::load(&args.config)?;
     if let Some(Cmd::Validate) = &args.cmd {
         return testrule::validate(&conf);
     }
-    let es = Es::from_conf(&conf.raw)?;
+    let es = Es::from_conf(&conf.raw)?.with_tracing(args.es_debug, args.es_debug_trace.as_deref())?;
 
     if let Some(Cmd::CreateIndex { index, old_index, recreate }) = &args.cmd {
         let index = index.as_deref().unwrap_or(&conf.writeback_index);
@@ -420,6 +446,8 @@ async fn main() -> Result<()> {
         run_every: conf.run_every,
         use_pit: conf.raw.get("use_pit").and_then(Value::as_bool).unwrap_or(true),
         debug: args.debug,
+        disabled: Default::default(),
+        disable_rules_on_error: conf.raw.get("disable_rules_on_error").and_then(Value::as_bool).unwrap_or(true),
         old_query_limit: conf.old_query_limit,
         alert_time_limit: conf.alert_time_limit,
         scroll_keepalive: conf.scroll_keepalive.clone(),
@@ -487,6 +515,12 @@ async fn main() -> Result<()> {
                 _ = tick.tick() => {
                     if !args.debug {
                         refresh_silences(&ctx, &conf.writeback_index).await;
+                    }
+                    if conf.raw.get("show_disabled_rules").and_then(Value::as_bool).unwrap_or(true) {
+                        let disabled = ctx.disabled.lock().unwrap().clone();
+                        if !disabled.is_empty() {
+                            log::info!("Disabled rules are: {disabled:?}");
+                        }
                     }
                     if !args.pin_rules {
                         rt.reload(&conf, args.rule.as_deref()).await;
