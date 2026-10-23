@@ -135,7 +135,9 @@ Global keys read from `config.yaml` (and inherited by every rule that does not s
 | `from_addr`, `smtp_host`, `email_reply_to` | used by the email alerter |
 | `rules_loader` | only the built-in file loader; custom Python loaders are not possible |
 | `es_send_get_body_as`, `ssl_show_warn`, `misfire_grace_time`, `max_aggregation` | accepted, ignored |
-| `notify_email`, `notify_alert`, `notify_all_errors` | **not supported** (accepted, ignored) |
+| `notify_email` (string or list), `notify_all_errors` | supported: see below |
+| `smtp_host`, `smtp_port`, `smtp_ssl`, `smtp_auth_file`, `from_addr`, `email_reply_to` | used by the email alerter **and** by `notify_email` |
+| `notify_alert` | **not supported** (accepted, ignored) |
 | `aws_region`, `profile` (SigV4 signing) | **not supported** |
 | `replace_dots_in_field_names`, `statsd_host`, `statsd_instance_tag` | **not supported** |
 | `logging:` (Python `dictConfig`) | **not supported**; logs go to stderr, level set by `--verbose` / `--debug` |
@@ -144,7 +146,19 @@ Global keys read from `config.yaml` (and inherited by every rule that does not s
 "uncaught exception"), an error document is written to the `_error` index and, if the option is `true` (default), the rule
 is parked: it is not run again until its file changes (reload) or the daemon restarts. Other rules keep running.
 Ordinary errors (Elasticsearch unreachable, bad query, missing timestamp field, alerter failure) never disable a rule; the next
-run retries. Unlike ElastAlert 2, no notification email is sent (`notify_email` is not supported).
+run retries.
+
+**`notify_email`**: operators are mailed when
+- a rule panics (subject `Uncaught exception in ElastAlert - <rule>`, text as in ElastAlert 2 plus the panic location and a backtrace;
+  it says whether the rule was disabled);
+- a new or changed rule file fails to load (subject `Uncaught exception in ElastAlert - <file>`; the previous version of the rule keeps running);
+- with `notify_all_errors: true`, on **every** logged error (`ElastAlert notification`, body = the error message). This can send one mail per
+  rule per run while Elasticsearch is down; use it knowingly.
+
+Recipients are `notify_email` from `config.yaml` plus the rule's own `notify_email` when it has one (de-duplicated). Mail is sent through
+`smtp_host` / `smtp_port` (default `localhost:25`, STARTTLS when offered; `smtp_ssl: true` for implicit TLS; `smtp_auth_file` for login) in the
+background, a failure to send is only logged. Differences from ElastAlert 2: generic error mails carry the message (upstream sends an empty
+body), and SMTP port / TLS / login are honoured (upstream uses `SMTP(smtp_host)` only).
 
 ## Writing rules
 
@@ -222,7 +236,7 @@ Each alerter has its own delivery state: if Slack is down and email works, only 
 - 39 of 44 alerters, notably PagerDuty, Opsgenie, Jira, TheHive, Teams, Mattermost, Discord, Telegram, SNS/SES, Zabbix.
 - Rule types `metric_aggregation`, `percentage_match`, `spike_aggregation`; the aggregation-query options (`bucket_interval`, ...).
 - `limit_execution`, Kibana / OpenSearch Discover links, EQL and ES|QL rules, `match_enhancements`, `jinja_filters`.
-- `notify_email`, `notify_alert`, `notify_all_errors` (no error notifications of any kind), statsd, AWS SigV4 signing, `replace_dots_in_field_names`.
+- `notify_alert` (error notifications through alerters), statsd, AWS SigV4 signing, `replace_dots_in_field_names`.
 - Per-rule Elasticsearch connections, Python plugins of any kind (rule types, alerters, loaders, enhancements, filters), Python `logging:` config.
 - Helm chart.
 - Elasticsearch older than 7 and any cluster not listed above.
@@ -317,6 +331,7 @@ src/alert.rs       alert text (match body, subject, summary tables, jinja)
 src/writeback.rs   bulk writer for the writeback indices
 src/testrule.rs    test-rule and validate
 src/metrics.rs     Prometheus endpoint
+src/notify.rs      notify_email
 src/setup.rs       create-index
 mappings/          writeback index mappings (from ElastAlert 2, see NOTICE)
 replica/           reconnaissance notes, architecture, feature matrix and build log written while porting
@@ -326,6 +341,5 @@ replica/           reconnaissance notes, architecture, feature matrix and build 
 
 ## License
 
-No license file has been chosen for this repository yet. ElastAlert 2 is Apache-2.0; the writeback mappings in `mappings/` come from it,
-and the behaviour, option names, log lines and document shapes are reimplemented to stay compatible (see `NOTICE`).
-Decide on a license before publishing or distributing images.
+Apache License 2.0, see [`LICENSE`](LICENSE). ElastAlert 2 is also Apache-2.0; the writeback mappings in `mappings/` come from it,
+and the behaviour, option names, log lines and document shapes are reimplemented to stay compatible (see [`NOTICE`](NOTICE)).

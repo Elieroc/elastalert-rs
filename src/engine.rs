@@ -52,6 +52,7 @@ pub struct Ctx {
     pub writeback: Writeback,
     pub silences: Arc<Silences>,
     pub metrics: Arc<Metrics>,
+    pub notifier: Option<Arc<crate::notify::Notifier>>,
     pub debug: bool,
     /// Rules disabled after a panic (`disable_rules_on_error`); shown in the log, cleared on reload.
     pub disabled: Arc<Mutex<Vec<String>>>,

@@ -200,6 +200,11 @@ pub struct Email {
 /// `smtp_auth_file`: a YAML file with `user` and `password`, relative to the rule file.
 fn read_account(rule: &Rule, file: &str) -> Result<Credentials> {
     let base = std::path::Path::new(rule.raw.get("rule_file").and_then(Value::as_str).unwrap_or("."));
+    read_account_file(base, file)
+}
+
+/// `file` may be relative to the directory of `base` (a rule or config file).
+pub fn read_account_file(base: &std::path::Path, file: &str) -> Result<Credentials> {
     let path = if std::path::Path::new(file).is_absolute() { file.into() } else { base.parent().unwrap_or(".".as_ref()).join(file) };
     let v = crate::config::read_yaml(&path)?;
     match (v["user"].as_str(), v["password"].as_str()) {
@@ -208,7 +213,7 @@ fn read_account(rule: &Rule, file: &str) -> Result<Credentials> {
     }
 }
 
-fn mailbox(addr: &str) -> Result<Mailbox> {
+pub fn mailbox(addr: &str) -> Result<Mailbox> {
     addr.parse().or_else(|_| format!("{addr}@localhost").parse()).with_context(|| format!("invalid email address {addr:?}"))
 }
 
@@ -272,17 +277,23 @@ impl Email {
         msg = msg.reply_to(mailbox(self.reply_to.as_deref().or(to.first().map(String::as_str)).unwrap_or(&self.from))?);
         let email = if self.html { msg.header(ContentType::TEXT_HTML).body(body)? } else { msg.header(ContentType::TEXT_PLAIN).body(body)? };
 
-        let tls = TlsParameters::new(self.host.clone())?;
-        let mut t = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.host)
-            .tls(if self.ssl { Tls::Wrapper(tls) } else { Tls::Opportunistic(tls) })
-            .port(self.port.unwrap_or(if self.ssl { 465 } else { 25 }));
-        if let Some(c) = &self.creds {
-            t = t.credentials(c.clone());
-        }
-        t.build().send(email).await.map_err(|e| anyhow::anyhow!("Error sending email via {}: {e}", self.host))?;
+        send_mail(&self.host, self.port, self.ssl, self.creds.as_ref(), email).await?;
         log::info!("Sent email to {to:?}");
         Ok(())
     }
+}
+
+/// Sends one message over SMTP: implicit TLS when `ssl`, else STARTTLS if the server offers it.
+pub async fn send_mail(host: &str, port: Option<u16>, ssl: bool, creds: Option<&Credentials>, email: Message) -> Result<()> {
+    let tls = TlsParameters::new(host.to_string())?;
+    let mut t = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
+        .tls(if ssl { Tls::Wrapper(tls) } else { Tls::Opportunistic(tls) })
+        .port(port.unwrap_or(if ssl { 465 } else { 25 }));
+    if let Some(c) = creds {
+        t = t.credentials(c.clone());
+    }
+    t.build().send(email).await.map_err(|e| anyhow::anyhow!("Error sending email via {host}: {e}"))?;
+    Ok(())
 }
 
 trait PipeOr {

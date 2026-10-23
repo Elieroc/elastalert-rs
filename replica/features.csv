@@ -81,7 +81,7 @@ Alert pipeline shared dict between alerters; alerts_order jira before email,aler
 Writeback indices: elastalert elastalert_status elastalert_error silence past_elastalert (ES 7 and 8 mappings),writeback,must,yes,yes,5 indices created with upstream ES 8 mappings (also used on 7)
 create_index CLI (elastalert-create-index),writeback,should,yes,yes,`elastalert create-index [--index --old-index --recreate]`; ES conn from config
 replace_dots_in_field_names,writeback,could,yes,no,
-Error handling: writeback error doc; disable_rules_on_error; notify_email / notify_alert / notify_all_errors,errors,must,yes,partial,"error docs and logs; disable_rules_on_error (panics only, rule parked until reload/restart); no notify_email / notify_alert / notify_all_errors"
+Error handling: writeback error doc; disable_rules_on_error; notify_email / notify_alert / notify_all_errors,errors,must,yes,partial,"error docs and logs; disable_rules_on_error; notify_email and notify_all_errors (panic, rule load failure, any error); no notify_alert"
 test_rule CLI (--schema-only --days --start --end --data --alert --save-json --use-downloaded --max-query-size --count-only --formatted-output --stop-error),cli,should,yes,yes,"`elastalert test-rule`: schema-only, days/start/end, data, alert, save-json, use-downloaded, max-query-size, count-only, formatted-output, stop-error; output text not byte-identical to upstream"
 Kibana discover URL (generate_kibana_discover_url etc.),integration,could,yes,no,
 OpenSearch discover URL,integration,could,yes,no,

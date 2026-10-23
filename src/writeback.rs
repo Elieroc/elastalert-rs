@@ -26,6 +26,8 @@ pub struct Writeback {
     index: String,
     /// test-rule: collect what would have been written instead of writing or logging it.
     capture: Option<std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>>,
+    /// `notify_email` + `notify_all_errors`: every logged error is also mailed.
+    notifier: Option<(std::sync::Arc<crate::notify::Notifier>, bool)>,
 }
 
 pub type Captured = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
@@ -33,16 +35,16 @@ pub type Captured = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
 impl Writeback {
     /// `es = None` (debug mode) logs the docs instead of writing them.
     pub fn start(es: Option<Es>, index: String) -> (Writeback, Option<JoinHandle<()>>) {
-        let Some(es) = es else { return (Writeback { tx: None, index, capture: None }, None) };
+        let Some(es) = es else { return (Writeback { tx: None, index, capture: None, notifier: None }, None) };
         let (tx, rx) = mpsc::channel(10_000);
         let handle = tokio::spawn(run(es, rx));
-        (Writeback { tx: Some(tx), index, capture: None }, Some(handle))
+        (Writeback { tx: Some(tx), index, capture: None, notifier: None }, Some(handle))
     }
 
     /// Writeback that records docs in memory (`(index, doc)`), for `test-rule`.
     pub fn capturing(index: String) -> (Writeback, Captured) {
         let c: Captured = Default::default();
-        (Writeback { tx: None, index, capture: Some(c.clone()) }, c)
+        (Writeback { tx: None, index, capture: Some(c.clone()), notifier: None }, c)
     }
 
     /// Deletes the doc with this `_id` (used for the children of a sent aggregated alert).
@@ -90,12 +92,25 @@ impl Writeback {
         }
     }
 
-    /// Logs the error and records it in the `_error` index.
+    pub fn with_notifier(mut self, notifier: Option<std::sync::Arc<crate::notify::Notifier>>, notify_all_errors: bool) -> Self {
+        self.notifier = notifier.map(|n| (n, notify_all_errors));
+        self
+    }
+
+    /// Logs the error and records it in the `_error` index (and mails it with `notify_all_errors`).
     pub async fn error(&self, message: String, data: Value) {
+        self.error_full(message, data, vec![], true).await
+    }
+
+    /// `notify`: false when the caller sends its own, more specific notification.
+    pub async fn error_full(&self, message: String, data: Value, traceback: Vec<String>, notify: bool) {
         log::error!("{message}");
+        if let (true, Some((n, true))) = (notify, &self.notifier) {
+            n.send("ElastAlert notification".into(), message.clone(), vec![]);
+        }
         let mut doc = Map::new();
         doc.insert("message".into(), json!(message));
-        doc.insert("traceback".into(), json!([]));
+        doc.insert("traceback".into(), json!(traceback));
         if !data.is_null() {
             doc.insert("data".into(), data);
         }

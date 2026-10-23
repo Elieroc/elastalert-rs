@@ -309,6 +309,7 @@ async fn run_rule(
         writeback: wb,
         silences: Arc::new(Silences::default()),
         metrics: Arc::new(Metrics::default()),
+        notifier: None,
         debug: !args.alert,
         disabled: Default::default(),
         disable_rules_on_error: false,

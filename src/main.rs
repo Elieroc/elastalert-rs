@@ -6,6 +6,7 @@ mod es;
 mod field;
 mod index;
 mod metrics;
+mod notify;
 mod rule;
 mod setup;
 mod testrule;
@@ -253,7 +254,11 @@ async fn rule_task(
                     // A bug, not a data or connection problem: upstream calls this an uncaught exception.
                     ctx.metrics.error();
                     let msg = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into());
-                    ctx.writeback.error(format!("Uncaught exception running rule {}: {msg}", st.rule.name), json!({"rule": st.rule.name})).await;
+                    let trace = notify::last_panic();
+                    ctx.writeback.error_full(format!("Uncaught exception running rule {}: {msg}", st.rule.name), json!({"rule": st.rule.name}), trace.clone(), false).await;
+                    if let Some(n) = &ctx.notifier {
+                        n.uncaught(&st.rule.name, notify::string_list(st.rule.raw.get("notify_email")), &format!("Uncaught exception running rule {}: {msg}", st.rule.name), &trace.join("\n"));
+                    }
                     if ctx.disable_rules_on_error {
                         drop(_permit);
                         ctx.disabled.lock().unwrap().push(st.rule.name.clone());
@@ -363,10 +368,12 @@ impl Runtime {
             let rule = match loaded {
                 Ok(r) => r,
                 Err(e) => {
-                    let msg = format!("Could not load rule {}: {e:#}", path.display());
-                    self.ctx.writeback.error(msg, json!({})).await;
-                    if let Some(r) = self.running.get_mut(&path) {
-                        r.hash = hash; // keep the old version running; don't complain every cycle
+                    self.load_failed(&path, &e).await;
+                    match self.running.get_mut(&path) {
+                        Some(r) => r.hash = hash, // keep the old version running; don't complain every cycle
+                        None => {
+                            self.running.insert(path, Running { hash, name: String::new(), task: None });
+                        }
                     }
                     continue;
                 }
@@ -383,7 +390,7 @@ impl Runtime {
             let mut st = match RuleState::new(rule) {
                 Ok(s) => s,
                 Err(e) => {
-                    self.ctx.writeback.error(format!("Could not load rule {}: {e:#}", path.display()), json!({})).await;
+                    self.load_failed(&path, &e).await;
                     continue;
                 }
             };
@@ -398,6 +405,17 @@ impl Runtime {
             let delay = if is_new { Duration::from_millis(pseudo_random(15_000)) } else { Duration::ZERO };
             let task = self.spawn(st, None, delay);
             self.running.insert(path, Running { hash, name, task: Some(task) });
+        }
+    }
+
+    /// Logs, records and mails a rule file that could not be loaded.
+    async fn load_failed(&self, path: &std::path::Path, e: &anyhow::Error) {
+        let msg = format!("Could not load rule {}: {e:#}", path.display());
+        self.ctx.writeback.error_full(msg.clone(), json!({}), vec![], false).await;
+        if let Some(n) = &self.ctx.notifier {
+            // The file may still be readable YAML with its own notify_email.
+            let extra = rule::load_yaml(path).map(|(r, _)| notify::string_list(r.get("notify_email"))).unwrap_or_default();
+            n.rule_load_failed(&path.display().to_string(), extra, &msg);
         }
     }
 
@@ -437,12 +455,17 @@ async fn main() -> Result<()> {
     if let (Some(port), false) = (args.prometheus_port, args.debug) {
         metrics::serve(format!("{}:{port}", args.prometheus_addr), metrics.clone()).await?;
     }
+    notify::install_panic_hook();
+    let notifier = notify::Notifier::from_conf(&conf, &args.config, args.pin_rules)?;
+    let notify_all = conf.raw.get("notify_all_errors").and_then(Value::as_bool).unwrap_or(false);
     let (wb, wb_handle) = Writeback::start((!args.debug).then(|| es.clone()), conf.writeback_index.clone());
+    let wb = wb.with_notifier(notifier.clone(), notify_all);
     let ctx = Arc::new(Ctx {
         es: es.clone(),
         writeback: wb,
         silences: Arc::new(Silences::default()),
         metrics: metrics.clone(),
+        notifier: notifier.clone(),
         run_every: conf.run_every,
         use_pit: conf.raw.get("use_pit").and_then(Value::as_bool).unwrap_or(true),
         debug: args.debug,

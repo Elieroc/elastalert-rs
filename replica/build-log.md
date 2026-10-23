@@ -130,3 +130,12 @@ summary_table_type html, `_source_enabled: false`, SigV4, statsd, Kibana/OpenSea
 | `add_metadata_alert` | done | tested |
 | load-time rejections added | done | `generate_kibana_discover_url`, `generate_opensearch_discover_url`, `match_enhancements`, `jinja_filters`, `include_rule_params_in_matches`, `_source_enabled: false`, and per-rule `es_host`/credentials/TLS options that differ from config.yaml. Before this they were silently ignored |
 | README.md | done | coverage tables for config keys, rule types, rule options, alerters, differences, tests, measurements |
+
+## Milestone 5 (2026-10-23)
+
+| area | status | notes |
+| --- | --- | --- |
+| License | done | Apache-2.0 `LICENSE` (standard text), `license` / `repository` in Cargo.toml, NOTICE line, README section |
+| `notify_email` | done | mails on rule panic (with location + backtrace, also stored in the error doc `traceback`), on rule files that fail to load, and with `notify_all_errors` on every logged error. Global + rule-level recipients, de-duplicated; SMTP options shared with the email alerter. Tested against the SMTP sink: panic mail to global + rule recipients, load-failure mail with the rule's own `notify_email`, notify_all_errors mail for an Elasticsearch 400 |
+| bug fixed on the way | done | a new rule file that fails to load was retried (and logged, and now mailed) on every reload tick; its hash is now remembered |
+| not done | | `notify_alert` |
