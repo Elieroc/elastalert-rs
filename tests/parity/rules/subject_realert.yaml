@@ -1,0 +1,13 @@
+name: realert default one minute
+type: frequency
+index: logs-parity
+num_events: 3
+timeframe:
+  minutes: 1
+query_key: host
+filter:
+- term:
+    event.outcome: failure
+alert_subject: "x {}"
+alert_subject_args: [host]
+alert: debug

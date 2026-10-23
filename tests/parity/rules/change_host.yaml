@@ -1,0 +1,16 @@
+name: host changed
+type: change
+index: logs-parity
+compare_key: host
+ignore_null: true
+query_key: user.name
+timeframe:
+  minutes: 1
+filter:
+- term:
+    event.outcome: failure
+- term:
+    user.name: eve
+realert:
+  minutes: 0
+alert: debug

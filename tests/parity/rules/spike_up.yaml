@@ -1,0 +1,16 @@
+name: spike failures per user
+type: spike
+index: logs-parity
+timeframe:
+  minutes: 10
+spike_height: 3
+spike_type: up
+threshold_ref: 2
+threshold_cur: 5
+query_key: user.name
+filter:
+- term:
+    event.outcome: failure
+realert:
+  minutes: 0
+alert: debug

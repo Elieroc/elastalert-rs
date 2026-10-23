@@ -2,14 +2,16 @@
 //! then silence/realert and alert on each match. Same semantics as ElastAlert's `run_rule`.
 
 use crate::alert;
+use crate::alerters::{Alerter, View};
+use crate::index;
 use crate::es::Es;
 use crate::field::{self, py_str};
 use crate::rule::Rule;
-use crate::time::{Dur, Ts, now, pretty, to_iso};
+use crate::time::{Dur, MINUTE, SECOND, Ts, now, pretty, to_iso};
 use crate::types::{Event, RuleType, parse_ts, ts_value};
 use crate::writeback::{Kind, Writeback};
 use anyhow::{Context, Result, bail};
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use serde_json::{Map, Value, json};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
@@ -21,6 +23,14 @@ pub struct Silences(Mutex<FxHashMap<String, (Ts, u32)>>);
 impl Silences {
     pub fn is_silenced(&self, key: &str) -> bool {
         self.0.lock().unwrap().get(key).is_some_and(|(until, _)| now() < *until)
+    }
+
+    /// Merge a silence read from ES: never shortens one we already know.
+    pub fn raise(&self, key: &str, until: Ts, exponent: u32) {
+        let mut m = self.0.lock().unwrap();
+        if m.get(key).is_none_or(|(u, _)| *u < until) {
+            m.insert(key.to_string(), (until, exponent));
+        }
     }
 
     pub fn set(&self, key: &str, until: Ts, exponent: u32) {
@@ -35,13 +45,27 @@ pub struct Ctx {
     pub silences: Arc<Silences>,
     pub debug: bool,
     pub old_query_limit: Dur,
+    pub alert_time_limit: Dur,
     pub scroll_keepalive: String,
     pub ts_fmt: Option<String>,
+}
+
+/// An alert that has not reached every alerter yet. Kept in memory and mirrored in ES (`alert_sent: false`).
+pub struct Pending {
+    pub id: String,
+    pub matches: Vec<Map<String, Value>>,
+    pub done: Vec<bool>,
+    pub attempts: u32,
+    pub next_try: Ts,
+    pub alert_time: Ts,
+    pub exception: String,
 }
 
 pub struct RuleState {
     pub rule: Rule,
     rtype: RuleType,
+    alerters: Vec<Alerter>,
+    pub pending: Vec<Pending>,
     starttime: Option<Ts>,
     previous_endtime: Option<Ts>,
     minimum_starttime: Option<Ts>,
@@ -60,9 +84,12 @@ fn id_hash(id: &str) -> u64 {
 }
 
 impl RuleState {
-    pub fn new(rule: Rule) -> Self {
-        RuleState {
-            rtype: RuleType::new(&rule),
+    pub fn new(rule: Rule) -> Result<Self> {
+        let alerters = rule.alerts.iter().map(|k| Alerter::from_rule(k, &rule)).collect::<Result<Vec<_>>>()?;
+        Ok(RuleState {
+            rtype: RuleType::new(&rule)?,
+            alerters,
+            pending: Vec::new(),
             rule,
             starttime: None,
             previous_endtime: None,
@@ -71,7 +98,15 @@ impl RuleState {
             hits: 0,
             dupes: 0,
             alerts_sent: 0,
-        }
+        })
+    }
+
+    /// After a reload: keep the query position, dedup set and unsent alerts of the previous version.
+    pub fn carry_over(&mut self, old: RuleState) {
+        (self.starttime, self.previous_endtime, self.minimum_starttime, self.seen, self.pending) =
+            (old.starttime, old.previous_endtime, old.minimum_starttime, old.seen, old.pending);
+        let n = self.alerters.len();
+        self.pending.iter_mut().for_each(|p| p.done.resize(n, false));
     }
 
     fn fmt_ts(&self, ts: Ts) -> Value {
@@ -83,6 +118,7 @@ impl RuleState {
         let mut must = vec![json!({"range": {&self.rule.timestamp_field: {"gt": self.fmt_ts(start), "lte": self.fmt_ts(end)}}})];
         // Old-style `- query: {...}` filter entries are unwrapped.
         must.extend(self.rule.filter.iter().map(|f| f.get("query").cloned().unwrap_or_else(|| f.clone())));
+        must.extend(self.rtype.extra_filter(&self.rule));
         json!({
             "query": {"bool": {"filter": {"bool": {"must": must}}}},
             "sort": [{&self.rule.timestamp_field: {"order": "asc"}}],
@@ -92,10 +128,13 @@ impl RuleState {
 
     /// Turns raw hits into events: merges `fields`, parses the timestamp, copies metadata,
     /// builds compound query keys.
-    fn process_hits(&self, hits: &[Value]) -> Result<Vec<Event>> {
+    fn process_hits(&self, hits: &mut [Value]) -> Result<Vec<Event>> {
         let mut out = Vec::with_capacity(hits.len());
-        for hit in hits {
-            let mut doc = hit.get("_source").and_then(Value::as_object).cloned().unwrap_or_default();
+        for hit in hits.iter_mut() {
+            let mut doc = match hit.get_mut("_source").map(Value::take) {
+                Some(Value::Object(m)) => m,
+                _ => Map::new(),
+            };
             if let Some(fields) = hit.get("fields").and_then(Value::as_object) {
                 for (k, v) in fields {
                     let v = match v {
@@ -132,10 +171,14 @@ impl RuleState {
         Ok(out)
     }
 
+    fn index_for(&self, start: Ts, end: Ts) -> Result<String> {
+        if self.rule.use_strftime_index { index::format_index(&self.rule.index, start, end, self.rule.search_extra_index) } else { Ok(self.rule.index.clone()) }
+    }
+
     /// Runs the search for [start, end] with scrolling, feeding every page to the rule type.
     async fn run_query(&mut self, ctx: &Ctx, start: Ts, end: Ts, matches: &mut Vec<Map<String, Value>>) -> Result<()> {
         let body = self.query(start, end);
-        let index = self.rule.index.clone();
+        let index = self.index_for(start, end)?;
         let size = self.rule.max_query_size;
         let mut resp = ctx.es.search_scroll(&index, &body, size, &ctx.scroll_keepalive).await?;
         let total = resp["hits"]["total"]["value"].as_u64().or_else(|| resp["hits"]["total"].as_u64()).unwrap_or(0);
@@ -144,7 +187,10 @@ impl RuleState {
         loop {
             pages += 1;
             check_shards(&resp)?;
-            let hits = resp["hits"]["hits"].as_array().cloned().unwrap_or_default();
+            let mut hits = match resp["hits"]["hits"].take() {
+                Value::Array(a) => a,
+                _ => Vec::new(),
+            };
             seen_hits += hits.len() as u64;
             self.hits += hits.len() as u64;
             let lt = self.rule.use_local_time;
@@ -162,7 +208,7 @@ impl RuleState {
             } else {
                 log::info!("{status}");
             }
-            let events = self.process_hits(&hits)?;
+            let events = self.process_hits(&mut hits)?;
             let before = events.len();
             let fresh: Vec<Event> = events
                 .into_iter()
@@ -235,6 +281,10 @@ impl RuleState {
     /// One run over (start, endtime]. Returns the number of matches.
     pub async fn run(&mut self, ctx: &Ctx, endtime: Ts, starttime: Option<Ts>) -> Result<usize> {
         let t0 = std::time::Instant::now();
+        if !ctx.debug {
+            self.retry_pending(ctx).await;
+        }
+        self.rtype.init(&self.rule, &ctx.es, starttime).await?;
         match starttime {
             Some(s) => self.starttime = Some(s),
             None => self.set_starttime(ctx, endtime).await,
@@ -255,18 +305,20 @@ impl RuleState {
             self.run_query(ctx, start, seg_end, &mut matches).await?;
             start = seg_end;
             self.starttime = Some(start);
-            self.rtype.garbage_collect(&self.rule, seg_end);
+            self.rtype.garbage_collect(&self.rule, seg_end, &mut matches);
         }
         self.run_query(ctx, start, endtime, &mut matches).await?;
-        self.rtype.garbage_collect(&self.rule, endtime);
+        self.rtype.garbage_collect(&self.rule, endtime, &mut matches);
+        self.enrich(ctx, &mut matches).await;
 
         let num_matches = matches.len();
         for mut m in matches {
             m.insert("num_hits".into(), json!(self.hits));
             m.insert("num_matches".into(), json!(num_matches));
             let mut key = self.rule.realert_key.clone();
-            if let Some(qv) = self.rule.query_key.as_ref().and_then(|qk| field::lookup(&m, qk)) {
-                key = format!("{key}.{}", py_str(qv));
+            let qv = self.rtype.silence_key(&m).or_else(|| self.rule.query_key.as_ref().and_then(|qk| field::lookup(&m, qk)).map(py_str));
+            if let Some(qv) = qv {
+                key = format!("{key}.{qv}");
             }
             if ctx.silences.is_silenced(&key) || ctx.silences.is_silenced(&format!("{}._silence", self.rule.name)) {
                 log::info!("Ignoring match for silenced rule {key}");
@@ -308,26 +360,169 @@ impl RuleState {
         Ok(num_matches)
     }
 
-    async fn alert(&mut self, ctx: &Ctx, matches: Vec<Map<String, Value>>) {
-        let fmt = ctx.ts_fmt.as_deref();
-        // Only the debug alerter exists so far; the loader rejects others outside --debug.
-        alert::debug_alert(&self.rule, &self.rtype, &matches, fmt);
-        if ctx.debug {
-            return; // --debug never counts as sent, like upstream
+    /// Matches were built from projected documents; fetch the full `_source` of the few that matched.
+    async fn enrich(&self, ctx: &Ctx, matches: &mut [Map<String, Value>]) {
+        if !self.rule.enrich || matches.is_empty() {
+            return;
         }
-        self.alerts_sent += 1;
-        for m in matches {
+        fn collect(m: &Map<String, Value>, out: &mut FxHashSet<(String, String)>) {
+            if let (Some(i), Some(d)) = (m.get("_index").and_then(Value::as_str), m.get("_id").and_then(Value::as_str)) {
+                out.insert((i.to_string(), d.to_string()));
+            }
+            for r in m.get("related_events").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object) {
+                collect(r, out);
+            }
+        }
+        let mut wanted = FxHashSet::default();
+        matches.iter().for_each(|m| collect(m, &mut wanted));
+        let wanted: Vec<_> = wanted.into_iter().collect();
+        let mut full: FxHashMap<(String, String), Map<String, Value>> = FxHashMap::default();
+        for chunk in wanted.chunks(500) {
+            match ctx.es.mget(chunk).await {
+                Ok(docs) => {
+                    for d in docs {
+                        if let (Some(i), Some(id), Some(src)) = (d["_index"].as_str(), d["_id"].as_str(), d["_source"].as_object()) {
+                            full.insert((i.to_string(), id.to_string()), src.clone());
+                        }
+                    }
+                }
+                Err(e) => log::warn!("rule {}: could not fetch full documents for matches, alerting with partial data: {e:#}", self.rule.name),
+            }
+        }
+        // Fields we asked ES for are replaced by the full values; everything else on the match
+        // (num_hits, spike_count, key, ...) was added by the rule and stays.
+        let mut tops: FxHashSet<&str> = FxHashSet::default();
+        for f in &self.rule.include {
+            tops.insert(f.as_str());
+            tops.insert(f.split('.').next().unwrap_or(f));
+        }
+        fn apply(m: &mut Map<String, Value>, full: &FxHashMap<(String, String), Map<String, Value>>, tops: &FxHashSet<&str>, ts_field: &str) {
+            if let (Some(i), Some(d)) = (m.get("_index").and_then(Value::as_str), m.get("_id").and_then(Value::as_str))
+                && let Some(src) = full.get(&(i.to_string(), d.to_string()))
+            {
+                let ts = field::lookup(m, ts_field).cloned();
+                for (k, v) in src {
+                    if tops.contains(k.as_str()) {
+                        m.insert(k.clone(), v.clone());
+                    } else {
+                        m.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                if let Some(ts) = ts
+                    && !field::set(m, ts_field, ts.clone())
+                {
+                    m.insert(ts_field.to_string(), ts);
+                }
+            }
+            if let Some(Value::Array(rel)) = m.get_mut("related_events") {
+                for r in rel.iter_mut().filter_map(Value::as_object_mut) {
+                    apply(r, full, tops, ts_field);
+                }
+            }
+        }
+        for m in matches.iter_mut() {
+            apply(m, &full, &tops, &self.rule.timestamp_field);
+        }
+    }
+
+    /// Runs every alerter not yet done for `p`. Returns true when all succeeded.
+    async fn deliver(&self, ctx: &Ctx, p: &mut Pending) -> bool {
+        let view = View { rule: &self.rule, rtype: &self.rtype, ts_fmt: ctx.ts_fmt.as_deref() };
+        let mut all = true;
+        for (i, a) in self.alerters.iter().enumerate() {
+            if p.done[i] {
+                continue;
+            }
+            match a.alert(&view, &p.matches).await {
+                Ok(()) => p.done[i] = true,
+                Err(e) => {
+                    all = false;
+                    p.exception = format!("{e:#}");
+                    ctx.writeback
+                        .error(format!("Error while running alert {}: {e:#}", a.kind()), json!({"rule": self.rule.name}))
+                        .await;
+                }
+            }
+        }
+        all
+    }
+
+    /// Writes the alert doc(s) for `p`: one per match, same `_id` every time so updates overwrite.
+    async fn write_alert(&self, ctx: &Ctx, p: &Pending) {
+        let sent: Vec<&str> = self.alerters.iter().zip(&p.done).filter(|(_, d)| **d).map(|(a, _)| a.kind()).collect();
+        let complete = p.done.iter().all(|d| *d);
+        for (n, m) in p.matches.iter().enumerate() {
             let mut doc = Map::new();
-            if let Some(t) = field::lookup(&m, &self.rule.timestamp_field) {
+            if let Some(t) = field::lookup(m, &self.rule.timestamp_field) {
                 doc.insert("match_time".into(), t.clone());
             }
             doc.insert("rule_name".into(), json!(self.rule.name));
-            doc.insert("alert_info".into(), json!({"type": "debug"}));
-            doc.insert("alert_sent".into(), json!(true));
-            doc.insert("alert_time".into(), json!(to_iso(now())));
-            doc.insert("match_body".into(), Value::Object(m));
-            ctx.writeback.write(Kind::Alert, doc).await;
+            doc.insert("alert_info".into(), self.alerters.first().map_or(json!({}), Alerter::info));
+            doc.insert("alert_sent".into(), json!(complete));
+            doc.insert("alert_time".into(), json!(to_iso(p.alert_time)));
+            doc.insert("alerters_sent".into(), json!(sent));
+            doc.insert("retry_count".into(), json!(p.attempts));
+            if !complete {
+                doc.insert("alert_exception".into(), json!(p.exception));
+            }
+            doc.insert("match_body".into(), Value::Object(m.clone()));
+            let id = if n == 0 { p.id.clone() } else { Writeback::new_id() };
+            ctx.writeback.write_id(Kind::Alert, &id, doc).await;
         }
+    }
+
+    async fn alert(&mut self, ctx: &Ctx, matches: Vec<Map<String, Value>>) {
+        if ctx.debug {
+            alert::debug_alert(&self.rule, &self.rtype, &matches, ctx.ts_fmt.as_deref());
+            return; // --debug never counts as sent, like upstream
+        }
+        let mut p = Pending {
+            id: Writeback::new_id(),
+            matches,
+            done: vec![false; self.alerters.len()],
+            attempts: 0,
+            next_try: 0,
+            alert_time: now(),
+            exception: String::new(),
+        };
+        let ok = self.deliver(ctx, &mut p).await;
+        self.alerts_sent += p.done.iter().filter(|d| **d).count() as u64 / self.alerters.len().max(1) as u64;
+        if !ok {
+            p.attempts = 1;
+            p.next_try = now() + backoff(1);
+        }
+        self.write_alert(ctx, &p).await;
+        if !ok {
+            self.pending.push(p);
+        }
+    }
+
+    /// Re-sends alerts whose alerters failed earlier; only the failed alerters are retried.
+    async fn retry_pending(&mut self, ctx: &Ctx) {
+        let mut pending = std::mem::take(&mut self.pending);
+        let mut keep = Vec::new();
+        for mut p in pending.drain(..) {
+            if now() - p.alert_time > ctx.alert_time_limit {
+                log::warn!("Giving up on alert {} of rule {}: older than alert_time_limit", p.id, self.rule.name);
+                continue;
+            }
+            if p.next_try > now() {
+                keep.push(p);
+                continue;
+            }
+            let ok = self.deliver(ctx, &mut p).await;
+            p.attempts += 1;
+            if !ok {
+                p.next_try = now() + backoff(p.attempts);
+            }
+            self.write_alert(ctx, &p).await;
+            if ok {
+                self.alerts_sent += 1;
+            } else {
+                keep.push(p);
+            }
+        }
+        self.pending = keep;
     }
 
     /// Forgets dedup ids older than buffer_time (+ query_delay).
@@ -335,6 +530,11 @@ impl RuleState {
         let horizon = now() - self.rule.buffer_time - self.rule.query_delay;
         self.seen.retain(|_, ts| *ts >= horizon);
     }
+}
+
+/// Retry delay: 30 s doubling per attempt, at most one hour.
+fn backoff(attempts: u32) -> Dur {
+    (30 * SECOND << attempts.min(7)).min(60 * MINUTE)
 }
 
 fn check_shards(resp: &Value) -> Result<()> {

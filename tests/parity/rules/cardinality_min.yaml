@@ -1,0 +1,14 @@
+name: few users per host
+type: cardinality
+index: logs-parity
+timeframe:
+  minutes: 5
+cardinality_field: user.name
+min_cardinality: 3
+filter:
+- term:
+    event.outcome: failure
+query_key: host
+realert:
+  minutes: 0
+alert: debug

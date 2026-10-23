@@ -83,6 +83,18 @@ fn ensure_blank_line(s: &mut String) {
     }
 }
 
+fn py_tuple(items: &[Value]) -> String {
+    let repr = |v: &Value| match v {
+        Value::String(s) if s.contains('\'') && !s.contains('"') => format!("\"{s}\""),
+        Value::String(s) => format!("'{}'", s.replace('\'', "\\'")),
+        other => py_str(other),
+    };
+    match items {
+        [one] => format!("({},)", repr(one)),
+        many => format!("({})", many.iter().map(repr).collect::<Vec<_>>().join(", ")),
+    }
+}
+
 fn pretty_json(v: &Value) -> String {
     let mut buf = Vec::new();
     let fmt = serde_json::ser::PrettyFormatter::with_indent(b"    ");
@@ -108,6 +120,8 @@ pub fn match_body(rule: &Rule, rtype: &RuleType, m: &Map<String, Value>, ts_fmt:
             // serde_json maps are sorted by key, like Python's `sorted(match.items())`.
             for (k, v) in m.iter().filter(|(k, _)| !k.starts_with("top_events_")) {
                 let val = match v {
+                    // new_term puts a Python tuple here for composite fields; it prints as a tuple, not JSON.
+                    Value::Array(a) if k == "new_field" || k == "missing_field" => py_tuple(a),
                     Value::Array(_) | Value::Object(_) => pretty_json(v),
                     _ => py_str(v),
                 };
@@ -118,15 +132,42 @@ pub fn match_body(rule: &Rule, rtype: &RuleType, m: &Map<String, Value>, ts_fmt:
     text
 }
 
+/// Body of one alert: one block per match, separated by a rule when there are several.
+pub fn create_alert_body(rule: &Rule, rtype: &RuleType, matches: &[Map<String, Value>], ts_fmt: Option<&str>) -> String {
+    let mut body = String::new();
+    for m in matches {
+        body.push_str(&match_body(rule, rtype, m, ts_fmt));
+        if matches.len() > 1 {
+            body.push_str("\n----------------------------------------\n");
+        }
+    }
+    body
+}
+
+/// Subject / title: `alert_subject` (+ `alert_subject_args`), else the alerter's default.
+pub fn create_title(rule: &Rule, matches: &[Map<String, Value>], default: impl FnOnce() -> String) -> String {
+    let Some(subject) = rule.raw.get("alert_subject") else { return default() };
+    let missing = rule_str(rule, "alert_missing_value").unwrap_or(MISSING);
+    let mut text = py_str(subject);
+    if let Some(Value::Array(args)) = rule.raw.get("alert_subject_args") {
+        let vals: Vec<String> = args.iter().map(|a| py_str(&arg_value(rule, &matches[0], &py_str(a), missing))).collect();
+        text = py_format(&text, &vals, &Map::new());
+    }
+    let max = rule.raw.get("alert_subject_max_len").and_then(Value::as_u64).unwrap_or(2048) as usize;
+    text.chars().take(max).collect()
+}
+
 /// `alert: debug` and `--debug`: log the alert instead of sending it.
 pub fn debug_alert(rule: &Rule, rtype: &RuleType, matches: &[Map<String, Value>], ts_fmt: Option<&str>) {
     for m in matches {
         let ts = field::lookup(m, &rule.timestamp_field).map(py_str).unwrap_or_else(|| "None".into());
-        match rule.query_key.as_ref().and_then(|qk| m.get(qk)) {
-            Some(qv) => log::info!("Alert for {}, {} at {}:", rule.name, py_str(qv), ts),
-            None => log::info!("Alert for {} at {}:", rule.name, ts),
-        }
-        log::info!("{}", match_body(rule, rtype, m, ts_fmt));
+        let head = match rule.query_key.as_ref().and_then(|qk| m.get(qk)) {
+            Some(qv) => format!("Alert for {}, {} at {}:", rule.name, py_str(qv), ts),
+            None => format!("Alert for {} at {}:", rule.name, ts),
+        };
+        // One log call so lines from rules running in parallel can't interleave; the second line
+        // reproduces the logger prefix the Python version prints for the body.
+        log::info!("{head}\nINFO:elastalert:{}", match_body(rule, rtype, m, ts_fmt));
     }
 }
 

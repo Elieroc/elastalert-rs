@@ -1,0 +1,12 @@
+name: strftime any
+type: any
+index: daily-parity-%Y.%m.%d
+use_strftime_index: true
+filter:
+- term:
+    user.name: eve
+- term:
+    event.outcome: failure
+realert:
+  minutes: 0
+alert: debug

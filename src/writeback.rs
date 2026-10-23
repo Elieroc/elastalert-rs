@@ -22,7 +22,7 @@ pub enum Kind {
 
 #[derive(Clone)]
 pub struct Writeback {
-    tx: Option<mpsc::Sender<(String, Value)>>,
+    tx: Option<mpsc::Sender<(String, Option<String>, Value)>>,
     index: String,
 }
 
@@ -45,12 +45,26 @@ impl Writeback {
         format!("{}{suffix}", self.index)
     }
 
-    pub async fn write(&self, kind: Kind, mut doc: Map<String, Value>) {
+    pub async fn write(&self, kind: Kind, doc: Map<String, Value>) {
+        self.send(kind, None, doc).await
+    }
+
+    /// Writes (or overwrites) the doc with this `_id`: used to update pending alerts in place.
+    pub async fn write_id(&self, kind: Kind, id: &str, doc: Map<String, Value>) {
+        self.send(kind, Some(id.to_string()), doc).await
+    }
+
+    /// Client-side id for a new alert doc, so it can be updated later without a round-trip.
+    pub fn new_id() -> String {
+        uuid::Uuid::now_v7().to_string()
+    }
+
+    async fn send(&self, kind: Kind, id: Option<String>, mut doc: Map<String, Value>) {
         doc.entry("@timestamp").or_insert_with(|| json!(to_iso(now())));
         match &self.tx {
             None => log::info!("Skipping writing to ES: {}", Value::Object(doc)),
             Some(tx) => {
-                let _ = tx.send((self.index_for(kind), Value::Object(doc))).await;
+                let _ = tx.send((self.index_for(kind), id, Value::Object(doc))).await;
             }
         }
     }
@@ -68,15 +82,19 @@ impl Writeback {
     }
 }
 
-async fn run(es: Es, mut rx: mpsc::Receiver<(String, Value)>) {
+async fn run(es: Es, mut rx: mpsc::Receiver<(String, Option<String>, Value)>) {
     let mut buf: Vec<String> = Vec::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         let open = tokio::select! {
             msg = rx.recv() => match msg {
-                Some((index, doc)) => {
-                    let id = uuid::Uuid::now_v7();
-                    buf.push(format!("{}\n{}\n", json!({"create": {"_index": index, "_id": id.to_string()}}), doc));
+                Some((index, id, doc)) => {
+                    // New docs use `create` so a retried bulk can't duplicate; explicit ids overwrite.
+                    let line = match id {
+                        Some(id) => json!({"index": {"_index": index, "_id": id}}),
+                        None => json!({"create": {"_index": index, "_id": uuid::Uuid::now_v7().to_string()}}),
+                    };
+                    buf.push(format!("{line}\n{doc}\n"));
                     if buf.len() < BATCH { continue }
                     true
                 }
@@ -90,7 +108,7 @@ async fn run(es: Es, mut rx: mpsc::Receiver<(String, Value)>) {
                 Ok(resp) => {
                     if resp["errors"] == json!(true) {
                         let first = resp["items"].as_array().and_then(|items| {
-                            items.iter().find_map(|i| i["create"]["error"].as_object().filter(|_| i["create"]["status"] != json!(409)))
+                            items.iter().find_map(|i| i.as_object()?.values().next()?["error"].as_object().filter(|_| i.as_object().and_then(|o| o.values().next()).is_some_and(|v| v["status"] != json!(409))))
                         });
                         if let Some(e) = first {
                             log::error!("Error writing to writeback index: {}", Value::Object(e.clone()));

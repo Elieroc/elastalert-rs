@@ -1,0 +1,11 @@
+name: many source ips
+type: cardinality
+index: logs-parity
+timeframe:
+  minutes: 10
+cardinality_field: source.ip
+max_cardinality: 60
+query_key: user.name
+realert:
+  minutes: 0
+alert: debug

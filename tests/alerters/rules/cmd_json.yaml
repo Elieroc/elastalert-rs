@@ -1,0 +1,18 @@
+name: command json
+type: any
+index: logs-parity
+filter:
+- term:
+    user.name: eve
+- term:
+    event.outcome: failure
+- range:
+    "@timestamp":
+      lte: "2026-10-01T09:00:30Z"
+alert:
+- command
+command: "cat >> /tmp/ea_command_json.txt"
+pipe_match_json: true
+fail_on_non_zero_exit: true
+realert:
+  minutes: 0

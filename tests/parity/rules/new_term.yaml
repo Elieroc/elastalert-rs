@@ -1,0 +1,11 @@
+name: new users and combos
+type: new_term
+index: logs-parity
+fields:
+- user.name
+- [host, event.outcome]
+terms_window_size:
+  hours: 3
+realert:
+  minutes: 0
+alert: debug

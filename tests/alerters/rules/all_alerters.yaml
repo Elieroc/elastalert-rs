@@ -1,0 +1,41 @@
+name: all alerters
+type: frequency
+index: logs-parity
+num_events: 5
+timeframe:
+  minutes: 2
+query_key: user.name
+filter:
+- term:
+    event.outcome: failure
+- term:
+    user.name: eve
+realert:
+  hours: 1
+alert_subject: "Brute force on {0}"
+alert_subject_args: [user.name]
+alert:
+- email
+- slack
+- post
+- command
+email:
+- soc@example.com
+- "$owner$"
+cc: audit@example.com
+smtp_host: 127.0.0.1
+smtp_port: 19325
+from_addr: elastalert@example.com
+slack_webhook_url: http://127.0.0.1:19300/slack
+slack_channel_override: ["#soc", "#alerts"]
+slack_username_override: ea-test
+http_post_url: http://127.0.0.1:19300/post
+http_post_static_payload:
+  source: elastalert-rs
+http_post_payload:
+  who: user.name
+  host: host
+http_post_headers:
+  X-Test: "1"
+command: ["sh", "-c", "echo ALERT {user.name} on %(host)s >> /tmp/ea_command_out.txt"]
+owner: owner@example.com

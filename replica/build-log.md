@@ -39,3 +39,47 @@ Not a performance benchmark yet; that is the bench in milestone 2.
 - Timestamps with a non-UTC offset are normalised to `Z` in match bodies (upstream keeps the offset).
 - `related_events` timestamps print as `...Z` (upstream prints `+00:00` there).
 - Format specs in `alert_text` (`{0:>5}`) are ignored, value printed plain. Warn-free for now.
+
+## Milestone 2 (2026-10-23)
+
+| area | status | notes |
+| --- | --- | --- |
+| rule types | done | spike (count + field_value), flatline, blacklist, whitelist, change, new_term (composite aggs at startup), cardinality (max + min). 15 parity rules, 444 alerts identical to Python 2.31.0 |
+| strftime indices | done | daily and hourly, `search_extra_index`; parity-tested |
+| alerters | done | email, slack, post, command (+ debug). Tested against local sinks (`tests/alerters/sink.py`): SMTP message, 2 slack channels, post with payload map + headers, command with substitution and `pipe_match_json` |
+| per-alerter delivery | done | stored in `alerters_sent`; failed ones retried with backoff (30 s doubling, max 1 h); recovered from ES at startup; only the failed alerters are re-sent. Verified: slack/post/email down, command ok -> restart with sinks up -> the three are sent, command not repeated, doc updated in place |
+| silences | done | preloaded at startup, refreshed every run_every; `--silence` from another process reaches a running daemon |
+| hot reload | done | add / change / remove / disable / invalid-file tested; position, dedup set and pending alerts survive |
+| projection + `_mget` (W2) | done | frequency, spike, flatline, change, new_term, cardinality fetch only the fields they use; matches get the full document. Same alert bodies as Python (549/549 on the bench) |
+| `create-index` | done | upstream ES 8 mappings (embedded). Without them `term rule_name` on a multi-word name never matches |
+| `es_hosts` | done | failover on connection errors |
+| not done | | aggregation, count/terms queries, top_count_keys, exponential_realert, jinja, metric/percentage/spike_aggregation, test-rule CLI, prometheus, `--es_debug(_trace)`, PIT (scroll only), TLS untested |
+
+### Correction to the milestone 1 report
+
+I wrote that a second launch resumed from the last `endtime`. That check was wrong: without `create-index` the
+status index was dynamically mapped (`rule_name` text), so the `term` query never matched, and the run started where
+`end - buffer_time` happened to put it. Now verified properly (run ending 10:20, next run started at 10:50 = previous
+endtime; the test config needs `old_query_limit` > the age of the replayed data, else the previous run counts as expired).
+
+### Bench (400,000 docs, ~1.3 KB each, ES 8.15 single node, same machine, frequency rule over 3 days, buffer_time 6 h)
+
+| | Python ElastAlert 2.31.0 | elastalert-rs |
+| --- | --- | --- |
+| rule time (`time_taken` in status doc) | 42.7 s | 4.8 s -> 4.2 s |
+| max RSS | 397 MB | 143 MB |
+| hits / matches | 398,769 / 549 | 398,769 / 549 |
+| match bodies | | 549 / 549 identical (after `float_roundtrip`) |
+
+Python process wall time is 60 s because replay mode waits one `run_every` before exiting; `time_taken` is the fair number.
+Not measured yet: bytes on the wire, idle RSS with many rules, 500-rule startup. Those targets from architecture.md are still open.
+
+Reproduce: `python3 bench/seed_fat.py http://127.0.0.1:19200 400000`, then run both daemons with `--start 2026-09-01T00:00:00Z --end 2026-09-04T00:00:00Z`
+using `bench/config-{rs,py}.yaml` and compare `bench_{rs,py}_status` and the `bench_{rs,py}` alert docs.
+
+### Known deviations (added)
+
+- `new_term` composite fields print as a Python tuple in the alert body like upstream, but are a JSON array in the ES doc (upstream also stores a list).
+- `ChangeRule` state is per rule instance (upstream shares one dict between all change rules).
+- new_term startup loads terms with one composite aggregation over the whole window instead of one terms agg per day (`window_step_size` ignored).
+- Log lines of an alert body are emitted in one call so parallel rules can't interleave them.

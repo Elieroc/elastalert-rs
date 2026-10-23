@@ -1,0 +1,14 @@
+name: blacklisted host
+type: blacklist
+index: logs-parity
+compare_key: host
+blacklist:
+- db-1
+filter:
+- term:
+    event.outcome: failure
+- term:
+    user.name: eve
+realert:
+  minutes: 0
+alert: debug

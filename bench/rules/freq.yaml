@@ -1,0 +1,10 @@
+name: bench frequency
+type: frequency
+index: bench-fat
+num_events: 42
+timeframe:
+  hours: 1
+query_key: user.name
+realert:
+  minutes: 0
+alert: debug

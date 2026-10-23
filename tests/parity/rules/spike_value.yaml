@@ -1,0 +1,11 @@
+name: spike avg duration
+type: spike
+index: logs-parity
+timeframe:
+  minutes: 5
+spike_height: 1.15
+spike_type: both
+field_value: event.duration
+realert:
+  minutes: 30
+alert: debug

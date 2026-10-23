@@ -23,8 +23,9 @@ for i in range(3000):
         'admin': user == 'alice',
         'message': f'login {"failed" if failed else "ok"} for {user}',
     }
-    lines.append(json.dumps({'index': {'_index': 'logs-parity', '_id': f'doc-{i}'}}))
-    lines.append(json.dumps(doc))
+    for idx in ('logs-parity', 'daily-parity-2026.10.01'):
+        lines.append(json.dumps({'index': {'_index': idx, '_id': f'doc-{i}'}}))
+        lines.append(json.dumps(doc))
 req = urllib.request.Request(es + '/_bulk?refresh=true', data=('\n'.join(lines) + '\n').encode(),
                              headers={'Content-Type': 'application/x-ndjson'})
 resp = json.load(urllib.request.urlopen(req))

@@ -104,6 +104,23 @@ pub fn pretty(ts: Ts, local: bool, fmt: Option<&str>) -> String {
     }
 }
 
+/// Python `str(timedelta)`: `0:15:00`, `1 day, 2:00:00`.
+pub fn pretty_duration(d: Dur) -> String {
+    let secs = d.div_euclid(SECOND);
+    let us = d.rem_euclid(SECOND);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let mut s = String::new();
+    if days != 0 {
+        s = format!("{days} day{}, ", if days.abs() != 1 { "s" } else { "" });
+    }
+    s += &format!("{}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60);
+    if us != 0 {
+        s += &format!(".{us:06}");
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +138,8 @@ mod tests {
 
     #[test]
     fn durations() {
+        assert_eq!(pretty_duration(15 * MINUTE), "0:15:00");
+        assert_eq!(pretty_duration(26 * 60 * MINUTE), "1 day, 2:00:00");
         assert_eq!(parse_duration_map(&serde_json::json!({"minutes": 15})).unwrap(), 15 * MINUTE);
         assert_eq!(parse_duration_arg("hours=2").unwrap(), 120 * MINUTE);
     }

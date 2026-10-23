@@ -1,0 +1,14 @@
+name: flatline eve failures
+type: flatline
+index: logs-parity
+timeframe:
+  minutes: 5
+threshold: 2
+filter:
+- term:
+    user.name: eve
+- term:
+    event.outcome: failure
+realert:
+  minutes: 0
+alert: debug

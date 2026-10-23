@@ -1,0 +1,16 @@
+name: not whitelisted host
+type: whitelist
+index: logs-parity
+compare_key: host
+whitelist:
+- web-1
+- web-2
+ignore_null: false
+filter:
+- term:
+    event.outcome: failure
+- term:
+    user.name: eve
+realert:
+  minutes: 0
+alert: debug
