@@ -1,0 +1,11 @@
+name: spike min both
+type: spike_aggregation
+index: logs-parity
+metric_agg_key: event.duration
+metric_agg_type: min
+spike_height: 2
+spike_type: both
+timeframe: {minutes: 10}
+query_key: host.keyword
+realert: {minutes: 0}
+alert: debug

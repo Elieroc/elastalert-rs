@@ -1,0 +1,10 @@
+name: metric value_count min
+type: metric_aggregation
+index: logs-parity
+metric_agg_key: user.name.keyword
+metric_agg_type: value_count
+min_threshold: 355
+filter:
+- term: {event.outcome.keyword: success}
+realert: {minutes: 0}
+alert: debug

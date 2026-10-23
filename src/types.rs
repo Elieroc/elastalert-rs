@@ -33,28 +33,66 @@ impl Event {
     }
 }
 
+/// A Python number: counts and sums stay integers until a float is added (`0` vs `0.0` shows in alerts).
+#[derive(Clone, Copy, Debug)]
+pub enum Num {
+    I(i64),
+    F(f64),
+}
+
+impl Num {
+    fn f(self) -> f64 {
+        match self {
+            Num::I(i) => i as f64,
+            Num::F(f) => f,
+        }
+    }
+
+    fn json(self) -> Value {
+        match self {
+            Num::I(i) => json!(i),
+            Num::F(f) => json!(f),
+        }
+    }
+
+    fn from_json(v: &Value) -> Option<Num> {
+        v.as_i64().map(Num::I).or_else(|| v.as_f64().map(Num::F))
+    }
+
+    fn plus(self, o: Num, sign: i64) -> Num {
+        match (self, o) {
+            (Num::I(a), Num::I(b)) => Num::I(a + sign * b),
+            (a, b) => Num::F(a.f() + sign as f64 * b.f()),
+        }
+    }
+}
+
 /// Time-ordered events covering less than `timeframe`. Oldest are evicted on append.
 pub struct EventWindow {
     timeframe: Dur,
-    data: VecDeque<(Event, i64)>,
-    count: i64,
+    data: VecDeque<(Event, Num)>,
+    count: Num,
 }
 
 impl EventWindow {
     pub fn new(timeframe: Dur) -> Self {
-        EventWindow { timeframe, data: VecDeque::new(), count: 0 }
+        EventWindow { timeframe, data: VecDeque::new(), count: Num::I(0) }
     }
 
     /// Inserts in timestamp order (after equal timestamps) and evicts while the span >= timeframe.
     /// Returns what was evicted, oldest first.
-    pub fn append(&mut self, ev: Event, count: i64) -> Vec<(Event, i64)> {
+    pub fn append(&mut self, ev: Event, count: Num) -> Vec<(Event, Num)> {
         let pos = self.data.partition_point(|(e, _)| e.ts <= ev.ts);
         self.data.insert(pos, (ev, count));
-        self.count += count;
+        if count.f() != 0.0 {
+            self.count = self.count.plus(count, 1);
+        }
         let mut evicted = Vec::new();
         while self.duration() >= self.timeframe {
             let Some(old) = self.data.pop_front() else { break };
-            self.count -= old.1;
+            if old.1.f() != 0.0 {
+                self.count = self.count.plus(old.1, -1);
+            }
             evicted.push(old);
         }
         evicted
@@ -67,13 +105,13 @@ impl EventWindow {
         }
     }
 
-    pub fn count(&self) -> i64 {
+    pub fn count(&self) -> Num {
         self.count
     }
 
     fn clear(&mut self) {
         self.data.clear();
-        self.count = 0;
+        self.count = Num::I(0);
     }
 
     pub fn last_ts(&self) -> Option<Ts> {
@@ -82,8 +120,17 @@ impl EventWindow {
 
     /// Mean of the counts (the field values) of non-placeholder entries.
     fn mean(&self) -> Option<f64> {
-        let vals: Vec<i64> = self.data.iter().filter(|(e, _)| !e.is_placeholder()).map(|(_, c)| *c).collect();
-        (!vals.is_empty()).then(|| vals.iter().sum::<i64>() as f64 / vals.len() as f64)
+        let vals: Vec<f64> = self.data.iter().filter(|(e, _)| !e.is_placeholder()).map(|(_, c)| c.f()).collect();
+        (!vals.is_empty()).then(|| vals.iter().sum::<f64>() / vals.len() as f64)
+    }
+
+    /// Smallest / largest value (the first one on ties), placeholders (0) included like upstream.
+    fn min(&self) -> Option<Num> {
+        self.data.iter().map(|(_, c)| *c).reduce(|a, b| if b.f() < a.f() { b } else { a })
+    }
+
+    fn max(&self) -> Option<Num> {
+        self.data.iter().map(|(_, c)| *c).reduce(|a, b| if b.f() > a.f() { b } else { a })
     }
 }
 
@@ -150,6 +197,8 @@ pub enum RuleType {
     Compare(Compare),
     NewTerm(NewTerm),
     Cardinality(Cardinality),
+    MetricAgg(MetricAgg),
+    Percentage(Percentage),
 }
 
 impl RuleType {
@@ -162,6 +211,9 @@ impl RuleType {
             Kind::Blacklist | Kind::Whitelist | Kind::Change => RuleType::Compare(Compare::new(rule)?),
             Kind::NewTerm => RuleType::NewTerm(NewTerm::new(rule)?),
             Kind::Cardinality => RuleType::Cardinality(Cardinality::new(rule)),
+            Kind::MetricAggregation => RuleType::MetricAgg(MetricAgg::new(rule)),
+            Kind::PercentageMatch => RuleType::Percentage(Percentage::new(rule)),
+            Kind::SpikeAggregation => RuleType::Spike(Spike::new(rule)),
         })
     }
 
@@ -182,6 +234,17 @@ impl RuleType {
             RuleType::Compare(c) => c.add_data(rule, events, matches),
             RuleType::NewTerm(n) => n.add_data(rule, events, matches),
             RuleType::Cardinality(c) => c.add_data(rule, events, matches),
+            RuleType::MetricAgg(_) | RuleType::Percentage(_) => {}
+        }
+    }
+
+    /// Result of an aggregation query (`Kind::is_agg_query`): `payload` is the response's `aggregations`.
+    pub fn add_aggregation(&mut self, rule: &Rule, ts: Ts, payload: &Value, matches: &mut Vec<Doc>) {
+        match self {
+            RuleType::MetricAgg(a) => walk_buckets(ts, payload, &mut |t, qk, b| a.check(rule, t, qk, b, matches)),
+            RuleType::Percentage(p) => walk_buckets(ts, payload, &mut |t, qk, b| p.check(rule, t, qk, b, matches)),
+            RuleType::Spike(s) => s.add_aggregation(rule, ts, payload, matches),
+            _ => {}
         }
     }
 
@@ -190,7 +253,7 @@ impl RuleType {
         let ev = || Event { ts, doc: Doc::from_iter([(rule.timestamp_field.clone(), json!(to_iso(ts)))]) };
         match self {
             RuleType::Frequency(f) => f.add_one(rule, ALL.into(), ev(), count, matches),
-            RuleType::Spike(s) => s.handle_event(rule, ev(), count, ALL.into(), matches),
+            RuleType::Spike(s) => s.handle_event(rule, ev(), Num::I(count), ALL.into(), matches),
             RuleType::Flatline(f) => f.add_counted(rule, ALL.into(), ev(), count, matches),
             _ => {}
         }
@@ -204,7 +267,7 @@ impl RuleType {
             let k = key.to_string();
             match self {
                 RuleType::Frequency(f) => f.add_one(rule, k, ev, *count, matches),
-                RuleType::Spike(s) => s.handle_event(rule, ev, *count, k, matches),
+                RuleType::Spike(s) => s.handle_event(rule, ev, Num::I(*count), k, matches),
                 RuleType::Flatline(f) => f.add_counted(rule, k, ev, *count, matches),
                 RuleType::NewTerm(n) => n.add_term_bucket(rule, ts, &qk, key, matches),
                 _ => {}
@@ -251,6 +314,16 @@ impl RuleType {
             RuleType::Spike(s) => {
                 let Some(ts) = ts() else { return String::new() };
                 let at = pretty(ts, lt, ts_fmt);
+                if let Some(t) = &s.agg_type {
+                    let key = rule.raw.get("metric_agg_key").map(py_str).unwrap_or_default();
+                    let round = |k: &str| m.get(k).map_or_else(|| "None".into(), round2);
+                    return format!(
+                        "An abnormal {t} of {key} ({}) occurred around {at}.\nPreceding that time, there was a {t} of {key} of ({}) within {}\n\n",
+                        round("spike_count"),
+                        round("reference_count"),
+                        pretty_duration(tf(rule))
+                    );
+                }
                 let (cur, refc) = (m.get("spike_count").and_then(Value::as_f64).unwrap_or(0.0), m.get("reference_count").and_then(Value::as_f64).unwrap_or(0.0));
                 match &s.field_value {
                     None => format!(
@@ -283,9 +356,80 @@ impl RuleType {
                     None => format!("Less than {} unique {}(s) occurred since last alert or between {start} and {end}\n\n", py_num(c.min.unwrap_or(0.0)), c.field),
                 }
             }
+            RuleType::MetricAgg(a) => {
+                let shown = m.get(&a.key).map_or_else(|| "None".into(), |v| rule.raw.get("metric_format_string").and_then(Value::as_str).map_or_else(|| py_str(v), |f| format_number(f, v)));
+                let opt = |k: &str| rule.raw.get(k).map_or_else(|| "None".into(), py_str);
+                format!(
+                    "Threshold violation, {}:{} {shown} (min: {} max : {}) \n\n",
+                    a.ty,
+                    rule.raw.get("metric_agg_key").map(py_str).unwrap_or_default(),
+                    opt("min_threshold"),
+                    opt("max_threshold")
+                )
+            }
+            RuleType::Percentage(_) => {
+                let pct = m.get("percentage");
+                let shown = pct.map_or_else(|| "None".into(), |v| rule.raw.get("percentage_format_string").and_then(Value::as_str).map_or_else(|| py_str(v), |f| format_number(f, v)));
+                let opt = |k: &str| rule.raw.get(k).map_or_else(|| "None".into(), py_str);
+                format!(
+                    "Percentage violation, value: {shown} (min: {} max : {}) of {} items\n\n",
+                    opt("min_percentage"),
+                    opt("max_percentage"),
+                    m.get("denominator").map_or_else(|| "None".into(), py_str)
+                )
+            }
             _ => String::new(),
         }
     }
+}
+
+/// Python `round(x, 2)` printed with `str()`: integers stay integers.
+fn round2(v: &Value) -> String {
+    match v.as_f64() {
+        Some(f) if !v.is_i64() && !v.is_u64() => py_str(&json!(format!("{f:.2}").parse::<f64>().unwrap_or(f))),
+        _ => py_str(v),
+    }
+}
+
+/// `'{:.2f}'.format(v)` and `'%.2f' % v` for the specs used on metrics (`f`, `%`, `d`, `.N` precision);
+/// anything else prints like `str(v)`.
+fn format_number(fmt: &str, v: &Value) -> String {
+    let f = v.as_f64().unwrap_or(f64::NAN);
+    let one = |spec: &str| {
+        let (prec, ty) = match spec.rsplit_once('.') {
+            Some((_, p)) => (p.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%').parse::<usize>().ok(), spec.chars().last()),
+            None => (None, spec.chars().last()),
+        };
+        match ty {
+            Some('f' | 'F') => format!("{f:.*}", prec.unwrap_or(6)),
+            Some('%') => format!("{:.*}%", prec.unwrap_or(6), f * 100.0),
+            Some('d' | 'i') => format!("{}", f as i64),
+            _ => py_str(v),
+        }
+    };
+    if let (true, Some(end)) = (fmt.starts_with('{'), fmt.find('}')) {
+        let spec = fmt[1..end].split_once(':').map_or("", |(_, s)| s);
+        return format!("{}{}", one(spec), &fmt[end + 1..]);
+    }
+    let (mut out, mut chars) = (String::new(), fmt.chars().peekable());
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+        } else if chars.peek() == Some(&'%') {
+            chars.next();
+            out.push('%');
+        } else {
+            let mut spec = String::new();
+            for n in chars.by_ref() {
+                spec.push(n);
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            out.push_str(&one(&spec));
+        }
+    }
+    out
 }
 
 fn py_num(f: f64) -> String {
@@ -323,8 +467,8 @@ impl Frequency {
 
     fn add_one(&mut self, rule: &Rule, key: String, ev: Event, count: i64, matches: &mut Vec<Doc>) {
         let window = self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule)));
-        window.append(ev, count);
-        if window.count() >= rule.num_events as i64 {
+        window.append(ev, Num::I(count));
+        if window.count().f() >= rule.num_events as f64 {
             let mut w = self.occurrences.remove(&key).expect("window just used");
             let (last, _) = w.data.pop_back().expect("non-empty window");
             let mut m = into_match(rule, last);
@@ -351,7 +495,7 @@ impl Flatline {
     }
 
     fn add_counted(&mut self, rule: &Rule, key: String, ev: Event, count: i64, matches: &mut Vec<Doc>) {
-        self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule))).append(ev, count);
+        self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule))).append(ev, Num::I(count));
         self.check(rule, &key, matches);
     }
 
@@ -359,7 +503,7 @@ impl Flatline {
         let mut last_key = None;
         for ev in events {
             let key = group_key(rule, &ev.doc);
-            self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule))).append(ev, 1);
+            self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule))).append(ev, Num::I(1));
             last_key = Some(key);
         }
         // Like upstream, only the last event's key is checked after a batch; the rest wait for garbage_collect.
@@ -376,12 +520,12 @@ impl Flatline {
         if most_recent - first < tf(rule) {
             return;
         }
-        let count = window.count();
+        let count = window.count().f();
         let threshold = self.threshold.as_f64().unwrap_or(0.0);
-        if (count as f64) < threshold {
+        if count < threshold {
             let mut m = into_match(rule, Event { ts: last_ev.ts, doc: last_ev.doc.clone() });
             m.insert("key".into(), key_value(key));
-            m.insert("count".into(), json!(count));
+            m.insert("count".into(), json!(count as i64));
             m.insert("threshold".into(), self.threshold.clone());
             matches.push(m);
             if opt_bool(rule, "forget_keys") {
@@ -402,7 +546,7 @@ impl Flatline {
         for key in keys {
             // A zero-count event slides the window so old events are evicted and absence is noticed.
             let ev = Event { ts, doc: Doc::from_iter([(rule.timestamp_field.clone(), json!(to_iso(ts)))]) };
-            self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule))).append(ev, 0);
+            self.occurrences.entry(key.clone()).or_insert_with(|| EventWindow::new(tf(rule))).append(ev, Num::I(0));
             self.first_event.entry(key.clone()).or_insert(ts);
             self.check(rule, &key, matches);
         }
@@ -418,6 +562,8 @@ pub struct Spike {
     skip_checks: FxHashMap<String, Ts>,
     ref_filled_once: bool,
     field_value: Option<String>,
+    /// `metric_agg_type` of a spike_aggregation rule; the windows then hold aggregated values.
+    agg_type: Option<String>,
 }
 
 impl Spike {
@@ -428,7 +574,8 @@ impl Spike {
             first_event: FxHashMap::default(),
             skip_checks: FxHashMap::default(),
             ref_filled_once: false,
-            field_value: rule.raw.get("field_value").and_then(Value::as_str).map(String::from),
+            field_value: (rule.kind == Kind::Spike).then(|| rule.raw.get("field_value").and_then(Value::as_str).map(String::from)).flatten(),
+            agg_type: (rule.kind == Kind::SpikeAggregation).then(|| rule.raw.get("metric_agg_type").map(py_str).unwrap_or_default()),
         }
     }
 
@@ -449,18 +596,25 @@ impl Spike {
                     }
                     let Some(v) = field::lookup(&ev.doc, f).filter(|v| !v.is_null()) else { continue };
                     match num(v) {
-                        Some(n) => self.handle_event(rule, ev, n as i64, qk, matches),
+                        Some(n) => self.handle_event(rule, ev, Num::I(n as i64), qk, matches),
                         None => log::warn!("{f} is not a number: {}", py_str(v)),
                     }
                 }
-                None => self.handle_event(rule, ev, 1, qk, matches),
+                None => self.handle_event(rule, ev, Num::I(1), qk, matches),
             }
         }
     }
 
-    fn values(&self, qk: &str) -> (Option<f64>, Option<f64>) {
+    fn values(&self, qk: &str) -> (Option<Num>, Option<Num>) {
         let (r, c) = (&self.ref_windows[qk], &self.cur_windows[qk]);
-        if self.field_value.is_some() { (r.mean(), c.mean()) } else { (Some(r.count() as f64), Some(c.count() as f64)) }
+        let mean = |w: &EventWindow| w.mean().map(Num::F);
+        match self.agg_type.as_deref() {
+            Some("avg") => (mean(r), mean(c)),
+            Some("min") => (r.min(), c.min()),
+            Some("max") => (r.max(), c.max()),
+            _ if self.field_value.is_some() => (mean(r), mean(c)),
+            _ => (Some(r.count()), Some(c.count())),
+        }
     }
 
     fn find_matches(&self, rule: &Rule, refv: Option<f64>, cur: Option<f64>) -> bool {
@@ -481,7 +635,7 @@ impl Spike {
         }
     }
 
-    pub fn handle_event(&mut self, rule: &Rule, ev: Event, count: i64, qk: String, matches: &mut Vec<Doc>) {
+    pub fn handle_event(&mut self, rule: &Rule, ev: Event, count: Num, qk: String, matches: &mut Vec<Doc>) {
         let timeframe = tf(rule);
         let ev_ts = ev.ts;
         self.first_event.entry(qk.clone()).or_insert(ev_ts);
@@ -507,36 +661,228 @@ impl Spike {
         }
 
         let (refv, cur) = self.values(&qk);
-        if !self.find_matches(rule, refv, cur) {
+        if !self.find_matches(rule, refv.map(Num::f), cur.map(Num::f)) {
             return;
         }
         let w = &self.cur_windows[&qk];
-        let pick = if self.field_value.is_some() { w.data.iter().find(|(e, _)| !e.is_placeholder()) } else { w.data.iter().find(|(_, c)| *c != 0) };
+        let pick = if self.field_value.is_some() { w.data.iter().find(|(e, _)| !e.is_placeholder()) } else { w.data.iter().find(|(_, c)| c.f() != 0.0) };
         let Some((src, _)) = pick.or(w.data.back()) else { return };
         let (m_ts, mut m) = (src.ts, into_match(rule, Event { ts: src.ts, doc: src.doc.clone() }));
-        m.insert("spike_count".into(), json!(cur));
-        m.insert("reference_count".into(), json!(refv));
-        if self.field_value.is_none() {
-            m.insert("spike_count".into(), json!(cur.unwrap_or(0.0) as i64));
-            m.insert("reference_count".into(), json!(refv.unwrap_or(0.0) as i64));
-        }
+        m.insert("spike_count".into(), cur.map_or(Value::Null, Num::json));
+        m.insert("reference_count".into(), refv.map_or(Value::Null, Num::json));
         matches.push(m);
         self.ref_windows.get_mut(&qk).expect("exists").clear();
         self.first_event.remove(&qk);
         self.skip_checks.insert(qk, m_ts + 2 * timeframe);
     }
 
+    /// `SpikeMetricAggregationRule.add_aggregation_data`: one tracker per (nested) term bucket.
+    fn add_aggregation(&mut self, rule: &Rule, ts: Ts, payload: &Value, matches: &mut Vec<Doc>) {
+        let node = metric_key(rule);
+        match payload.get("bucket_aggs") {
+            Some(terms) => self.unwrap_terms(rule, ts, terms, &node, &mut Vec::new(), matches),
+            None => {
+                // No term split: the whole payload is the aggregation.
+                let doc = Doc::from_iter([(rule.timestamp_field.clone(), json!(to_iso(ts)))]);
+                if let Some(v) = self.agg_value(&payload[&node]) {
+                    self.handle_event(rule, Event { ts, doc }, v, ALL.into(), matches);
+                }
+            }
+        }
+    }
+
+    /// A null metric (no document in the bucket) is skipped; upstream fails on it.
+    fn agg_value(&self, node: &Value) -> Option<Num> {
+        metric_values(self.agg_type.as_deref().unwrap_or_default(), node).first().and_then(Num::from_json)
+    }
+
+    fn unwrap_terms(&mut self, rule: &Rule, ts: Ts, terms: &Value, node: &str, path: &mut Vec<String>, matches: &mut Vec<Doc>) {
+        for term in terms["buckets"].as_array().into_iter().flatten() {
+            path.push(py_str(&term["key"]));
+            match term.get("bucket_aggs").filter(|b| truthy(Some(b))) {
+                Some(inner) => self.unwrap_terms(rule, ts, inner, node, path, matches),
+                None => {
+                    if let Some(v) = self.agg_value(&term[node]) {
+                        let qk = path.join(",");
+                        let mut doc = Doc::from_iter([(rule.timestamp_field.clone(), json!(to_iso(ts)))]);
+                        doc.extend(rule.query_key.clone().map(|k| (k, json!(qk))));
+                        self.handle_event(rule, Event { ts, doc }, v, json!(qk).to_string(), matches);
+                    }
+                }
+            }
+            path.pop();
+        }
+    }
+
     fn garbage_collect(&mut self, rule: &Rule, ts: Ts, matches: &mut Vec<Doc>) {
         let keys: Vec<String> = self.cur_windows.keys().cloned().collect();
         for qk in keys {
-            if qk != ALL && self.ref_windows[&qk].count() == 0 && self.cur_windows[&qk].count() == 0 {
+            if qk != ALL && self.ref_windows[&qk].count().f() == 0.0 && self.cur_windows[&qk].count().f() == 0.0 {
                 self.cur_windows.remove(&qk);
                 self.ref_windows.remove(&qk);
                 continue;
             }
             let ph = Event::placeholder(rule, ts, (qk != ALL).then(|| key_value(&qk)));
-            self.handle_event(rule, ph, 0, qk, matches);
+            self.handle_event(rule, ph, Num::I(0), qk, matches);
         }
+    }
+}
+
+// ---- metric_aggregation / percentage_match ----
+
+/// Name of the metric aggregation in the query and the match: `metric_<key>_<type>`.
+fn metric_key(rule: &Rule) -> String {
+    let get = |k: &str| rule.raw.get(k).map(py_str).unwrap_or_default();
+    format!("metric_{}_{}", get("metric_agg_key"), get("metric_agg_type"))
+}
+
+/// Metric(s) of an aggregation node: its `value`, or for percentiles the `values` by ascending percent.
+fn metric_values(ty: &str, node: &Value) -> Vec<Value> {
+    if ty != "percentiles" {
+        return vec![node["value"].clone()];
+    }
+    let mut v: Vec<(f64, &Value)> = node["values"].as_object().into_iter().flatten().map(|(k, v)| (k.parse().unwrap_or(f64::MAX), v)).collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    v.into_iter().map(|(_, v)| v.clone()).collect()
+}
+
+/// Start of a `date_histogram` bucket.
+fn bucket_ts(b: &Value) -> Option<Ts> {
+    match b["key_as_string"].as_str() {
+        Some(s) => crate::time::parse_iso(s),
+        None => b["key"].as_f64().map(|ms| (ms * 1e3) as Ts),
+    }
+}
+
+/// `BaseAggregationRule.add_aggregation_data`: calls `f(timestamp, query_key, bucket)` for every leaf bucket
+/// (one per interval, per term, or the payload itself).
+fn walk_buckets(ts: Ts, payload: &Value, f: &mut dyn FnMut(Ts, Option<&Value>, &Value)) {
+    let intervals = |qk: Option<&Value>, buckets: &Value, f: &mut dyn FnMut(Ts, Option<&Value>, &Value)| {
+        for b in buckets.as_array().into_iter().flatten() {
+            f(bucket_ts(b).unwrap_or(ts), qk, b);
+        }
+    };
+    if let Some(iv) = payload.get("interval_aggs") {
+        intervals(None, &iv["buckets"], f);
+    } else if let Some(terms) = payload.get("bucket_aggs") {
+        for term in terms["buckets"].as_array().into_iter().flatten() {
+            match term.get("interval_aggs") {
+                Some(iv) => intervals(Some(&term["key"]), &iv["buckets"], f),
+                None => f(ts, Some(&term["key"]), term),
+            }
+        }
+    } else {
+        f(ts, None, payload);
+    }
+}
+
+/// `query_key: a.b` + value -> `{a: {b: value}}` (upstream `expand_string_into_dict`).
+fn expand_into(doc: &mut Doc, path: &str, v: Value) {
+    fn nested(path: &str, v: Value) -> Value {
+        match path.split_once('.') {
+            Some((head, rest)) => json!({ head: nested(rest, v) }),
+            None => json!({ path: v }),
+        }
+    }
+    match path.split_once('.') {
+        Some((head, rest)) => doc.insert(head.into(), nested(rest, v)),
+        None => doc.insert(path.into(), v),
+    };
+}
+
+pub struct MetricAgg {
+    key: String,
+    ty: String,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+impl MetricAgg {
+    fn new(rule: &Rule) -> Self {
+        MetricAgg { key: metric_key(rule), ty: rule.raw.get("metric_agg_type").map(py_str).unwrap_or_default(), min: opt_f64(rule, "min_threshold"), max: opt_f64(rule, "max_threshold") }
+    }
+
+    fn crossed(&self, v: &Value) -> bool {
+        v.as_f64().is_some_and(|v| self.max.is_some_and(|m| v > m) || self.min.is_some_and(|m| v < m))
+    }
+
+    fn formatted(&self, rule: &Rule, m: &mut Doc, v: &Value) {
+        if let Some(f) = rule.raw.get("metric_format_string").and_then(Value::as_str) {
+            m.insert(format!("{}_formatted", self.key), json!(format_number(f, v)));
+            m.insert("metric_agg_value_formatted".into(), json!(format_number(f, v)));
+        }
+    }
+
+    fn check(&self, rule: &Rule, ts: Ts, qk: Option<&Value>, bucket: &Value, matches: &mut Vec<Doc>) {
+        if !rule.compound_query_key.is_empty() {
+            return self.check_nested(rule, ts, bucket, &rule.compound_query_key, &mut Doc::new(), matches);
+        }
+        let v = metric_values(&self.ty, &bucket[&self.key]).into_iter().next().unwrap_or(Value::Null);
+        if !self.crossed(&v) {
+            return;
+        }
+        let mut m = Doc::from_iter([(self.key.clone(), v.clone()), ("metric_agg_value".into(), v.clone())]);
+        self.formatted(rule, &mut m, &v);
+        if let (Some(q), Some(k)) = (&rule.query_key, qk) {
+            expand_into(&mut m, q, k.clone());
+        }
+        matches.push(into_match(rule, Event { ts, doc: m }));
+    }
+
+    /// Compound `query_key`: one terms level per key, the metric sits in the innermost bucket.
+    fn check_nested(&self, rule: &Rule, ts: Ts, node: &Value, keys: &[String], data: &mut Doc, matches: &mut Vec<Doc>) {
+        let Some(k) = keys.first() else { return };
+        data.insert(k.clone(), node["key"].clone());
+        if let Some(terms) = node.get("bucket_aggs") {
+            for t in terms["buckets"].as_array().into_iter().flatten() {
+                self.check_nested(rule, ts, t, &keys[1..], data, matches);
+            }
+            return;
+        }
+        let values: Vec<Value> = match node.get("interval_aggs") {
+            Some(iv) => iv["buckets"].as_array().into_iter().flatten().map(|b| b[&self.key]["value"].clone()).collect(),
+            None => metric_values(&self.ty, &node[&self.key]),
+        };
+        for v in values.into_iter().filter(|v| self.crossed(v)) {
+            data.insert(self.key.clone(), v.clone());
+            let joined: Vec<String> = rule.compound_query_key.iter().map(|k| data.get(k).map_or_else(|| "None".into(), py_str)).collect();
+            data.insert(rule.query_key.clone().unwrap_or_default(), json!(joined.join(",")));
+            self.formatted(rule, data, &v);
+            matches.push(into_match(rule, Event { ts, doc: data.clone() }));
+        }
+    }
+}
+
+pub struct Percentage {
+    min: Option<f64>,
+    max: Option<f64>,
+    min_denominator: f64,
+}
+
+impl Percentage {
+    fn new(rule: &Rule) -> Self {
+        Percentage { min: opt_f64(rule, "min_percentage"), max: opt_f64(rule, "max_percentage"), min_denominator: opt_f64(rule, "min_denominator").unwrap_or(0.0) }
+    }
+
+    fn check(&self, rule: &Rule, ts: Ts, qk: Option<&Value>, bucket: &Value, matches: &mut Vec<Doc>) {
+        let b = &bucket["percentage_match_aggs"]["buckets"];
+        let (Some(hit), Some(other)) = (b["match_bucket"]["doc_count"].as_i64(), b["_other_"]["doc_count"].as_i64()) else { return };
+        let total = hit + other;
+        if total == 0 || (total as f64) < self.min_denominator {
+            return;
+        }
+        let pct = hit as f64 / total as f64 * 100.0;
+        if !(self.max.is_some_and(|m| pct > m) || self.min.is_some_and(|m| pct < m)) {
+            return;
+        }
+        let mut m = Doc::from_iter([("percentage".to_string(), json!(pct)), ("denominator".to_string(), json!(total))]);
+        if let Some(f) = rule.raw.get("percentage_format_string").and_then(Value::as_str) {
+            m.insert("percentage_formatted".into(), json!(format_number(f, &json!(pct))));
+        }
+        if let (Some(q), Some(k)) = (&rule.query_key, qk) {
+            expand_into(&mut m, q, k.clone());
+        }
+        matches.push(into_match(rule, Event { ts, doc: m }));
     }
 }
 
@@ -848,14 +1194,101 @@ mod tests {
     #[test]
     fn window_evicts_at_timeframe() {
         let mut w = EventWindow::new(10);
-        w.append(ev(0), 1);
-        w.append(ev(5), 1);
-        assert_eq!(w.count(), 2);
-        let gone = w.append(ev(10), 1); // span 10 >= 10 -> evict ts 0
+        w.append(ev(0), Num::I(1));
+        w.append(ev(5), Num::I(1));
+        assert_eq!(w.count().f(), 2.0);
+        let gone = w.append(ev(10), Num::I(1)); // span 10 >= 10 -> evict ts 0
         assert_eq!(gone.len(), 1);
-        assert_eq!(w.count(), 2);
-        w.append(ev(7), 1); // out of order insert
+        assert_eq!(w.count().f(), 2.0);
+        w.append(ev(7), Num::I(1)); // out of order insert
         assert_eq!(w.data.iter().map(|(e, _)| e.ts).collect::<Vec<_>>(), vec![5, 7, 10]);
+    }
+
+    fn rule_from(yaml: &str) -> Rule {
+        let dir = std::env::temp_dir().join(format!("ea-types-{}-{}", std::process::id(), yaml.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("r.yaml");
+        std::fs::write(&f, format!("name: t\nindex: x\nalert: debug\n{yaml}")).unwrap();
+        let conf = crate::config::Config::load_with_defaults(&dir.join("none.yaml")).unwrap();
+        let rule = crate::rule::load(&f, &conf).unwrap();
+        std::fs::remove_dir_all(dir).ok();
+        rule
+    }
+
+    fn matches_of(rule: &Rule, ts: Ts, payload: Value) -> Vec<Doc> {
+        let mut rt = RuleType::new(rule).unwrap();
+        let mut out = Vec::new();
+        rt.add_aggregation(rule, ts, &payload, &mut out);
+        out
+    }
+
+    #[test]
+    fn metric_aggregation_thresholds_and_query_key() {
+        let rule = rule_from("type: metric_aggregation\nmetric_agg_key: cpu.load\nmetric_agg_type: avg\nmax_threshold: 80\nquery_key: host.name\nmetric_format_string: '{:.1f}%'\n");
+        let payload = json!({"bucket_aggs": {"buckets": [
+            {"key": "a", "doc_count": 3, "metric_cpu.load_avg": {"value": 91.25}},
+            {"key": "b", "doc_count": 3, "metric_cpu.load_avg": {"value": 10.0}},
+            {"key": "c", "doc_count": 0, "metric_cpu.load_avg": {"value": null}},
+        ]}});
+        let m = matches_of(&rule, 1_700_000_000_000_000, payload);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0]["host"], json!({"name": "a"}));
+        assert_eq!(m[0]["metric_cpu.load_avg"], json!(91.25));
+        assert_eq!(m[0]["metric_agg_value_formatted"], json!("91.2%"));
+        assert_eq!(m[0]["@timestamp"], json!("2023-11-14T22:13:20Z"));
+        let text = RuleType::new(&rule).unwrap().match_str(&rule, &m[0], None);
+        assert_eq!(text, "Threshold violation, avg:cpu.load 91.2% (min: None max : 80) \n\n");
+    }
+
+    #[test]
+    fn metric_aggregation_compound_key_and_intervals() {
+        let rule = rule_from("type: metric_aggregation\nmetric_agg_key: bytes\nmetric_agg_type: sum\nmin_threshold: 5\nquery_key: [a, b]\nbucket_interval: {minutes: 5}\nbuffer_time: {minutes: 15}\n");
+        let leaf = |k: &str, v: f64| json!({"key": k, "interval_aggs": {"buckets": [{"metric_bytes_sum": {"value": v}}, {"metric_bytes_sum": {"value": 9.0}}]}});
+        let payload = json!({"bucket_aggs": {"buckets": [{"key": "x", "bucket_aggs": {"buckets": [leaf("y", 1.0), leaf("z", 7.0)]}}]}});
+        let m = matches_of(&rule, 0, payload);
+        assert_eq!(m.len(), 1);
+        assert_eq!((&m[0]["a"], &m[0]["b"], &m[0]["a,b"]), (&json!("x"), &json!("y"), &json!("x,y")));
+        assert_eq!(m[0]["metric_bytes_sum"], json!(1.0));
+    }
+
+    #[test]
+    fn percentage_match_bounds_and_denominator() {
+        let rule = rule_from("type: percentage_match\nmatch_bucket_filter: [{term: {ok: true}}]\nmax_percentage: 60\nmin_denominator: 10\nbucket_interval: {minutes: 5}\n");
+        let bucket = |key: &str, hit: i64, other: i64| json!({"key_as_string": key, "percentage_match_aggs": {"buckets": {"match_bucket": {"doc_count": hit}, "_other_": {"doc_count": other}}}});
+        let payload = json!({"interval_aggs": {"buckets": [
+            bucket("2024-03-01T10:00:00.000Z", 8, 2),  // 80% of 10: match
+            bucket("2024-03-01T10:05:00.000Z", 3, 1),  // below min_denominator
+            bucket("2024-03-01T10:10:00.000Z", 5, 5),  // 50%: fine
+        ]}});
+        let m = matches_of(&rule, 0, payload);
+        assert_eq!(m.len(), 1);
+        assert_eq!((&m[0]["percentage"], &m[0]["denominator"], &m[0]["@timestamp"]), (&json!(80.0), &json!(10), &json!("2024-03-01T10:00:00Z")));
+        let text = RuleType::new(&rule).unwrap().match_str(&rule, &m[0], None);
+        assert_eq!(text, "Percentage violation, value: 80.0 (min: None max : 60) of 10 items\n\n");
+    }
+
+    #[test]
+    fn spike_aggregation_sum_keeps_decimals() {
+        let rule = rule_from("type: spike_aggregation\nmetric_agg_key: bytes\nmetric_agg_type: sum\nspike_height: 2\nspike_type: up\ntimeframe: {minutes: 1}\nuse_local_time: false\n");
+        let mut rt = RuleType::new(&rule).unwrap();
+        let mut out = Vec::new();
+        for (secs, v) in [(0, 10.0), (60, 10.0), (120, 50.0)] {
+            rt.add_aggregation(&rule, secs * 1_000_000, &json!({"metric_bytes_sum": {"value": v}}), &mut out);
+        }
+        assert_eq!(out.len(), 1);
+        assert_eq!((&out[0]["spike_count"], &out[0]["reference_count"]), (&json!(50.0), &json!(10.0)));
+        let text = rt.match_str(&rule, &out[0], Some("%H:%M"));
+        assert_eq!(text, "An abnormal sum of bytes (50.0) occurred around 00:02.\nPreceding that time, there was a sum of bytes of (10.0) within 0:01:00\n\n");
+    }
+
+    #[test]
+    fn number_formats() {
+        assert_eq!(format_number("{:.2%}", &json!(0.5)), "50.00%");
+        assert_eq!(format_number("{:.2f} ms", &json!(3)), "3.00 ms");
+        assert_eq!(format_number("%.1f%%", &json!(12.34)), "12.3%");
+        assert_eq!(format_number("%d items", &json!(4.9)), "4 items");
+        assert_eq!(round2(&json!(12.345)), "12.35");
+        assert_eq!(round2(&json!(7)), "7");
     }
 
     #[test]

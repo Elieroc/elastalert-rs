@@ -1,0 +1,10 @@
+name: metric avg duration per user
+type: metric_aggregation
+index: logs-parity
+metric_agg_key: event.duration
+metric_agg_type: avg
+max_threshold: 1.6
+query_key: user.name.keyword
+bucket_interval: {minutes: 5}
+realert: {minutes: 0}
+alert: debug

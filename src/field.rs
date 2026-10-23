@@ -114,10 +114,30 @@ pub fn py_str(v: &Value) -> String {
 
 fn py_float(f: f64) -> String {
     if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e16 {
-        format!("{f:.1}")
-    } else {
-        f.to_string()
+        return format!("{f:.1}");
     }
+    let shortest = f.to_string();
+    // With 17 digits Rust breaks exact ties upwards where Python's repr rounds to even
+    // (a float32 widened to f64 ends in ...5 at the 18th digit); the exact-mode format agrees with Python.
+    let digits = shortest.bytes().filter(u8::is_ascii_digit).skip_while(|b| *b == b'0').count();
+    if digits < 17 || !f.is_finite() {
+        return shortest;
+    }
+    let exact = format!("{f:.16e}");
+    let (mantissa, exp) = exact.split_once('e').expect("exponent form");
+    let exp: i32 = exp.parse().expect("exponent");
+    if exact.parse::<f64>() != Ok(f) || !(-5..16).contains(&exp) {
+        return shortest;
+    }
+    let (sign, mantissa) = mantissa.strip_prefix('-').map_or(("", mantissa), |m| ("-", m));
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let plain = if exp >= 0 {
+        let int = (exp + 1) as usize;
+        format!("{}.{}", &digits[..int], &digits[int..])
+    } else {
+        format!("0.{}{}", "0".repeat((-exp - 1) as usize), digits)
+    };
+    format!("{sign}{}", plain.trim_end_matches('0').trim_end_matches('.'))
 }
 
 #[cfg(test)]
@@ -147,6 +167,14 @@ mod tests {
         assert!(set(&mut d, "a.b", json!(2)));
         assert_eq!(lookup(&d, "a.b"), Some(&json!(2)));
         assert!(!set(&mut d, "zz", json!(1)));
+    }
+
+    #[test]
+    fn python_float_repr_ties() {
+        assert_eq!(py_str(&serde_json::json!(2.6110000610351562)), "2.6110000610351562");
+        assert_eq!(py_str(&serde_json::json!(-0.30000000000000004)), "-0.30000000000000004");
+        assert_eq!(py_str(&serde_json::json!(0.1)), "0.1");
+        assert_eq!(py_str(&serde_json::json!(12.0)), "12.0");
     }
 
     #[test]

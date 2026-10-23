@@ -1,0 +1,14 @@
+name: metric max with filter and key
+type: metric_aggregation
+index: logs-parity
+metric_agg_key: event.duration
+metric_agg_type: max
+max_threshold: 2.5
+filter:
+- term: {event.outcome.keyword: failure}
+query_key: user.name.keyword
+sync_bucket_interval: true
+bucket_interval: {minutes: 3}
+buffer_time: {minutes: 15}
+realert: {minutes: 0}
+alert: debug

@@ -1,0 +1,10 @@
+name: metric percentile
+type: metric_aggregation
+index: logs-parity
+metric_agg_key: event.duration
+metric_agg_type: percentiles
+percentile_range: 95
+max_threshold: 2.9
+query_key: host.keyword
+realert: {minutes: 0}
+alert: debug

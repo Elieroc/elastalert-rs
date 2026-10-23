@@ -1,0 +1,11 @@
+name: percentage failures per user
+type: percentage_match
+index: logs-parity
+match_bucket_filter:
+- term: {event.outcome.keyword: failure}
+max_percentage: 20
+min_denominator: 20
+query_key: user.name.keyword
+percentage_format_string: '{:.2f}%'
+realert: {minutes: 0}
+alert: debug

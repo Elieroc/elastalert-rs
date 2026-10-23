@@ -1,0 +1,10 @@
+name: metric sum compound
+type: metric_aggregation
+index: logs-parity
+metric_agg_key: event.duration
+metric_agg_type: sum
+min_threshold: 40
+query_key: [user.name.keyword, host.keyword]
+metric_format_string: '{:.1f} s'
+realert: {minutes: 0}
+alert: debug

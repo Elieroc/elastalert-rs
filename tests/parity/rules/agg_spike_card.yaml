@@ -1,0 +1,12 @@
+name: spike cardinality compound
+type: spike_aggregation
+index: logs-parity
+metric_agg_key: source.ip.keyword
+metric_agg_type: cardinality
+spike_height: 1.5
+spike_type: up
+timeframe: {minutes: 10}
+query_key: [host.keyword, user.name.keyword]
+alert_on_new_data: true
+realert: {minutes: 0}
+alert: debug

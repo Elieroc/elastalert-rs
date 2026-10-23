@@ -1,0 +1,10 @@
+name: spike max up
+type: spike_aggregation
+index: logs-parity
+metric_agg_key: event.duration
+metric_agg_type: max
+spike_height: 1.02
+spike_type: down
+timeframe: {minutes: 5}
+realert: {minutes: 0}
+alert: debug

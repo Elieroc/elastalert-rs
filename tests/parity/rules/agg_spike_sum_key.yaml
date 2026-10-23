@@ -1,0 +1,15 @@
+name: spike sum failures per user
+type: spike_aggregation
+index: logs-parity
+metric_agg_key: event.duration
+metric_agg_type: sum
+spike_height: 3
+spike_type: up
+timeframe: {minutes: 10}
+threshold_ref: 1
+threshold_cur: 5
+query_key: user.name.keyword
+filter:
+- term: {event.outcome.keyword: failure}
+realert: {minutes: 0}
+alert: debug

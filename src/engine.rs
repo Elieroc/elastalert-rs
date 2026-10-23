@@ -96,6 +96,8 @@ pub struct RuleState {
     starttime: Option<Ts>,
     previous_endtime: Option<Ts>,
     minimum_starttime: Option<Ts>,
+    /// Seconds added to `date_histogram` buckets so they start at the query start (`bucket_interval`).
+    bucket_offset: i64,
     /// Hash of `_id` -> event time, to skip hits already seen in overlapping windows.
     seen: FxHashMap<u64, Ts>,
     /// Documents to query instead of ES (`test-rule --data`).
@@ -130,6 +132,7 @@ impl RuleState {
             starttime: None,
             previous_endtime: None,
             minimum_starttime: None,
+            bucket_offset: 0,
             seen: FxHashMap::default(),
             mock: None,
             hits: 0,
@@ -150,6 +153,7 @@ impl RuleState {
             starttime: None,
             previous_endtime: None,
             minimum_starttime: None,
+            bucket_offset: 0,
             seen: FxHashMap::default(),
             mock: None,
             hits: 0,
@@ -171,6 +175,10 @@ impl RuleState {
                 g.alert_time = 0;
             }
         }
+    }
+
+    fn aggregating(&self) -> bool {
+        self.rule.kind.is_agg_query()
     }
 
     fn counting(&self) -> bool {
@@ -293,6 +301,9 @@ impl RuleState {
             return self.run_mock(ctx, start, end, matches);
         }
         let index = self.index_for(start, end)?;
+        if self.aggregating() {
+            return self.agg_query(ctx, &index, start, end, matches).await;
+        }
         if self.rule.use_count_query {
             let body = json!({"query": self.filters(start, end, vec![])});
             let count = ctx.es.count(&index, &body).await.map_err(|e| anyhow::anyhow!("Error running count query: {e:#}"))?;
@@ -320,6 +331,36 @@ impl RuleState {
         self.scroll_pages(ctx, start, end, &index, body, matches).await
     }
 
+    /// metric_aggregation / percentage_match / spike_aggregation: the rule's aggregation, optionally split by
+    /// `bucket_interval` (date histogram) and by each `query_key` field (terms), as upstream's `get_aggregation_query`.
+    async fn agg_query(&mut self, ctx: &Ctx, index: &str, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
+        let rule = &self.rule;
+        let mut aggs = rule.agg_query.clone().expect("aggregation rule types always have one");
+        if let Some((period, _)) = &rule.bucket_interval {
+            let mut histogram = json!({"field": rule.timestamp_field, "fixed_interval": period});
+            if self.bucket_offset > 0 {
+                histogram["offset"] = json!(format!("+{}s", self.bucket_offset));
+            }
+            aggs = json!({"interval_aggs": {"date_histogram": histogram, "aggs": aggs}});
+        }
+        if let Some(qk) = &rule.query_key {
+            let min = rule.raw.get("min_doc_count").and_then(Value::as_u64).unwrap_or(1);
+            for field in qk.split(',').rev() {
+                aggs = json!({"bucket_aggs": {"terms": {"field": field, "size": rule.terms_size, "min_doc_count": min}, "aggs": aggs}});
+            }
+        }
+        let body = json!({"query": self.filters(start, end, vec![]), "size": 0, "aggs": aggs});
+        let resp = ctx.es.search(index, &body).await.map_err(|e| anyhow::anyhow!("Error running query: {e:#}"))?;
+        let total = resp["hits"]["total"]["value"].as_u64().or_else(|| resp["hits"]["total"].as_u64()).unwrap_or(0);
+        self.hits += total;
+        let (lt, fmt) = (self.rule.use_local_time, ctx.ts_fmt.as_deref());
+        log::info!("Queried rule {} from {} to {}: {} hits", self.rule.name, pretty(start, lt, fmt), pretty(end, lt, fmt), total);
+        if let Some(payload) = resp.get("aggregations") {
+            self.rtype.add_aggregation(&self.rule, end, payload, matches);
+        }
+        Ok(())
+    }
+
     /// Terms aggregation `field` -> (key, doc_count), most frequent first.
     #[allow(clippy::too_many_arguments)]
     async fn terms(&self, ctx: &Ctx, index: &str, start: Ts, end: Ts, field: String, size: u64, extra: Vec<Value>) -> Result<Vec<(Value, i64)>> {
@@ -339,6 +380,9 @@ impl RuleState {
 
     /// Mock data (`test-rule --data`): same time filter as upstream's mock (`start <= ts < end`).
     fn run_mock(&mut self, ctx: &Ctx, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
+        if self.aggregating() {
+            bail!("test-rule --data / --use-downloaded cannot replay aggregation rule types (metric_aggregation, percentage_match, spike_aggregation)");
+        }
         let docs = self.mock.as_ref().expect("checked by caller");
         if self.rule.use_count_query {
             let n = docs.iter().filter(|d| self.in_range(d, start, end)).count();
@@ -473,8 +517,9 @@ impl RuleState {
             && !ctx.debug
             && let Some(last) = self.last_run_end(ctx).await
         {
-            self.starttime = Some(last);
-            self.minimum_starttime = Some(last);
+            self.starttime = Some(self.overlap(last));
+            self.sync_interval();
+            self.minimum_starttime = self.starttime;
             return;
         }
         if self.counting() {
@@ -492,9 +537,28 @@ impl RuleState {
             // Documents carry an ingest time: no need to re-read the overlap, just continue where we stopped.
             _ if self.rule.ingest_field.is_some() && !self.rule.scan_entire_timeframe => self.previous_endtime.or(self.minimum_starttime).unwrap_or(buffer_delta),
             (Some(min), _) if min > buffer_delta => min,
-            (_, Some(prev)) if prev < buffer_delta => prev,
+            (_, Some(prev)) if prev < buffer_delta => self.overlap(prev),
             _ => buffer_delta,
         });
+        self.sync_interval();
+    }
+
+    /// `allow_buffer_time_overlap`: aggregation queries restart `buffer_time - run_every` earlier.
+    fn overlap(&self, start: Ts) -> Ts {
+        let r = &self.rule;
+        if self.aggregating() && r.allow_buffer_time_overlap && !r.use_run_every_query_size && r.buffer_time > r.run_every { start - (r.buffer_time - r.run_every) } else { start }
+    }
+
+    /// `bucket_interval`: either snap the start to a bucket boundary (`sync_bucket_interval`) or shift the buckets to it.
+    fn sync_interval(&mut self) {
+        let (Some((_, interval)), Some(start)) = (&self.rule.bucket_interval, self.starttime) else { return };
+        let (secs, step) = (start.div_euclid(SECOND), (interval / SECOND).max(1));
+        let offset = secs.rem_euclid(step);
+        if self.rule.sync_bucket_interval {
+            self.starttime = Some((secs - offset) * SECOND);
+        } else {
+            self.bucket_offset = offset;
+        }
     }
 
     /// One run over (start, endtime]. Returns the number of matches.
@@ -518,7 +582,8 @@ impl RuleState {
         }
 
         // Long ranges are split into segments, like a continuously running instance would see them.
-        let segment = if self.counting() { ctx.run_every } else { self.rule.buffer_time }.max(1);
+        let agg = self.aggregating();
+        let segment = if self.counting() || (agg && self.rule.use_run_every_query_size) { ctx.run_every } else { self.rule.buffer_time }.max(1);
         let mut matches = Vec::new();
         let mut start = original_start;
         while endtime - start > segment {
@@ -528,8 +593,18 @@ impl RuleState {
             self.starttime = Some(start);
             self.rtype.garbage_collect(&self.rule, seg_end, &mut matches);
         }
-        self.run_query(ctx, start, endtime, &mut matches).await?;
-        self.rtype.garbage_collect(&self.rule, endtime, &mut matches);
+        let mut endtime = endtime;
+        if !agg {
+            self.run_query(ctx, start, endtime, &mut matches).await?;
+            self.rtype.garbage_collect(&self.rule, endtime, &mut matches);
+        } else if endtime - start == segment {
+            // Aggregations only run over whole segments (like upstream); a shorter rest waits for the next run.
+            self.run_query(ctx, start, endtime, &mut matches).await?;
+        } else if start == original_start {
+            return Ok(0);
+        } else {
+            endtime = start;
+        }
         self.enrich(ctx, &mut matches).await;
 
         let num_matches = matches.len();

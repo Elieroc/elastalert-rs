@@ -1,0 +1,15 @@
+name: metric script
+type: metric_aggregation
+index: logs-parity
+metric_agg_key: dur_x2
+metric_agg_type: avg
+metric_agg_script:
+  script:
+    source: "doc['event.duration'].value * 2"
+    lang: painless
+max_threshold: 3.1
+bucket_interval: {minutes: 5}
+query_key: host.keyword
+terms_size: 2
+realert: {minutes: 0}
+alert: debug

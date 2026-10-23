@@ -1,0 +1,10 @@
+name: percentage failures intervals
+type: percentage_match
+index: logs-parity
+match_bucket_filter:
+- term: {event.outcome.keyword: failure}
+min_percentage: 4
+max_percentage: 9
+bucket_interval: {minutes: 5}
+realert: {minutes: 0}
+alert: debug

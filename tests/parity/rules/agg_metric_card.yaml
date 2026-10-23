@@ -1,0 +1,8 @@
+name: metric cardinality ips
+type: metric_aggregation
+index: logs-parity
+metric_agg_key: source.ip.keyword
+metric_agg_type: cardinality
+max_threshold: 120
+realert: {minutes: 0}
+alert: debug

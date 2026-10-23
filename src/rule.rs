@@ -1,7 +1,7 @@
 //! Rule files: discovery, `import:` chains, defaults inherited from config.yaml, validation.
 
 use crate::config::{Config, read_yaml};
-use crate::time::{Dur, MINUTE, parse_duration_map};
+use crate::time::{Dur, MINUTE, SECOND, parse_duration_map};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -17,6 +17,16 @@ pub enum Kind {
     Change,
     NewTerm,
     Cardinality,
+    MetricAggregation,
+    PercentageMatch,
+    SpikeAggregation,
+}
+
+impl Kind {
+    /// Types answered by one aggregation query per segment instead of by hits.
+    pub fn is_agg_query(self) -> bool {
+        matches!(self, Kind::MetricAggregation | Kind::PercentageMatch | Kind::SpikeAggregation)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +89,13 @@ pub struct Rule {
     pub jinja_template: Option<String>,
     pub max_query_size: u64,
     pub max_scrolling_count: u64,
+    /// metric_aggregation / percentage_match / spike_aggregation: the aggregation sub-tree to run.
+    pub agg_query: Option<Value>,
+    /// `bucket_interval` as an Elasticsearch `fixed_interval` (`5m`) and in microseconds.
+    pub bucket_interval: Option<(String, Dur)>,
+    pub use_run_every_query_size: bool,
+    pub sync_bucket_interval: bool,
+    pub allow_buffer_time_overlap: bool,
     pub alerts: Vec<String>,
     /// The merged rule document; alert text and alerters read arbitrary keys from it.
     pub raw: Map<String, Value>,
@@ -225,6 +242,9 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         Some("change") => Kind::Change,
         Some("new_term") => Kind::NewTerm,
         Some("cardinality") => Kind::Cardinality,
+        Some("metric_aggregation") => Kind::MetricAggregation,
+        Some("percentage_match") => Kind::PercentageMatch,
+        Some("spike_aggregation") => Kind::SpikeAggregation,
         other => bail!("rule type {other:?} is not supported yet"),
     };
     for unsupported in [
@@ -330,7 +350,34 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
                 bail!("CardinalityRule must have one of either max_cardinality or min_cardinality");
             }
         }
+        Kind::MetricAggregation => {
+            need(&["metric_agg_key", "metric_agg_type"])?;
+            if !raw.contains_key("max_threshold") && !raw.contains_key("min_threshold") {
+                bail!("MetricAggregationRule must have at least one of either max_threshold or min_threshold");
+            }
+        }
+        Kind::SpikeAggregation => need(&["timeframe", "spike_height", "spike_type", "metric_agg_key", "metric_agg_type"])?,
+        Kind::PercentageMatch => {
+            need(&["match_bucket_filter"])?;
+            if !raw.contains_key("max_percentage") && !raw.contains_key("min_percentage") {
+                bail!("PercentageMatchRule must have at least one of either min_percentage or max_percentage");
+            }
+            if compound_query_key.len() > 1 {
+                bail!("a compound query_key is not supported for percentage_match rules");
+            }
+        }
     }
+    let buffer_time = dur_opt(&raw, "buffer_time")?.unwrap_or(conf.buffer_time);
+    let run_every = dur_opt(&raw, "run_every")?.unwrap_or(conf.run_every);
+    let use_run_every_query_size = raw.get("use_run_every_query_size").and_then(Value::as_bool).unwrap_or(false);
+    let (agg_query, bucket_interval) = if kind.is_agg_query() {
+        if raw.contains_key("ingest_timestamp_field") {
+            bail!("ingest_timestamp_field is not supported for {:?} rules", raw["type"]);
+        }
+        agg_options(kind, &raw, buffer_time, run_every, use_run_every_query_size)?
+    } else {
+        (None, None)
+    };
     if raw.get("scan_entire_timeframe").and_then(Value::as_bool).unwrap_or(false) && timeframe.is_none() {
         bail!("scan_entire_timeframe can only be used if there is a timeframe specified");
     }
@@ -414,7 +461,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     }
     include.sort();
     include.dedup();
-    let enrich = !full;
+    let enrich = !full && !kind.is_agg_query();
 
     let alerts = match &raw["alert"] {
         Value::String(s) => vec![s.clone()],
@@ -439,8 +486,13 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     Ok(Rule {
         realert: dur_opt(&raw, "realert")?.unwrap_or(if aggregation.is_some() { 0 } else { MINUTE }),
         realert_key: raw.get("realert_key").and_then(Value::as_str).unwrap_or(&name).to_string(),
-        buffer_time: dur_opt(&raw, "buffer_time")?.unwrap_or(conf.buffer_time),
-        run_every: dur_opt(&raw, "run_every")?.unwrap_or(conf.run_every),
+        buffer_time,
+        run_every,
+        agg_query,
+        bucket_interval,
+        use_run_every_query_size,
+        sync_bucket_interval: raw.get("sync_bucket_interval").and_then(Value::as_bool).unwrap_or(false),
+        allow_buffer_time_overlap: raw.get("allow_buffer_time_overlap").and_then(Value::as_bool).unwrap_or(false),
         query_delay: dur_opt(&raw, "query_delay")?.unwrap_or(0),
         use_local_time: raw.get("use_local_time").and_then(Value::as_bool).unwrap_or(true),
         file: file.to_path_buf(),
@@ -480,6 +532,56 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         alerts,
         raw,
     })
+}
+
+const METRIC_TYPES: [&str; 7] = ["min", "max", "avg", "sum", "cardinality", "value_count", "percentiles"];
+
+/// The aggregation sub-tree and `bucket_interval` of the aggregation rule types (`BaseAggregationRule`).
+fn agg_options(kind: Kind, raw: &Map<String, Value>, buffer_time: Dur, run_every: Dur, run_every_size: bool) -> Result<(Option<Value>, Option<(String, Dur)>)> {
+    let interval = match raw.get("bucket_interval").filter(|v| v.as_object().is_some_and(|m| !m.is_empty())) {
+        None => None,
+        Some(v) => {
+            let m = v.as_object().expect("filtered above");
+            let (unit, n) = [("seconds", 's'), ("minutes", 'm'), ("hours", 'h'), ("days", 'd'), ("weeks", 'w')]
+                .iter()
+                .find_map(|(name, u)| m.get(*name).map(|n| (*u, crate::field::py_str(n))))
+                .context("Unsupported window size")?;
+            let dur = parse_duration_map(v).context("invalid time format for bucket_interval")?;
+            if dur < SECOND {
+                bail!("bucket_interval must be at least one second");
+            }
+            let (what, size) = if run_every_size { ("run_every", run_every) } else { ("Buffer_time", buffer_time) };
+            if size % dur != 0 {
+                bail!("{what} must be evenly divisible by bucket_interval if specified");
+            }
+            Some((format!("{n}{unit}"), dur))
+        }
+    };
+    if kind == Kind::PercentageMatch {
+        let filter = raw["match_bucket_filter"].clone();
+        let element = json!({"percentage_match_aggs": {"filters": {"other_bucket": true, "filters": {"match_bucket": {"bool": {"must": filter}}}}}});
+        return Ok((Some(element), interval));
+    }
+    if kind == Kind::SpikeAggregation && interval.is_some() {
+        bail!("bucket intervals are not supported for spike aggregation alerts");
+    }
+    let ty = raw["metric_agg_type"].as_str().unwrap_or_default();
+    if !METRIC_TYPES.contains(&ty) {
+        bail!("metric_agg_type must be one of {METRIC_TYPES:?}");
+    }
+    let key = crate::field::py_str(&raw["metric_agg_key"]);
+    let mut inner = match raw.get("metric_agg_script").filter(|v| !matches!(v, Value::Null | Value::Bool(false)) && *v != &json!("")) {
+        Some(Value::Object(m)) => m.clone(),
+        Some(script) => Map::from_iter([("script".to_string(), script.clone())]),
+        None => Map::from_iter([("field".to_string(), json!(key))]),
+    };
+    if ty == "percentiles" && !inner.contains_key("percents") {
+        match raw.get("percentile_range") {
+            None | Some(Value::Null) => bail!("percentile_range must be specified for percentiles aggregation"),
+            Some(p) => inner.insert("percents".into(), json!([p])),
+        };
+    }
+    Ok((Some(json!({format!("metric_{key}_{ty}"): {ty: inner}})), interval))
 }
 
 /// `$other_key$` values are replaced by that rule key's value (alerter options reference rule fields).
