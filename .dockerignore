@@ -1,6 +1,6 @@
 target
 .git
-replica
+docs
 bench
 tests
 *.log

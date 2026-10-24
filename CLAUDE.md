@@ -20,13 +20,13 @@ Toolchain: Rust 1.99, edition 2024 (let-chains used).
 Integration harnesses need a throwaway Elasticsearch and are not part of `cargo test`:
 - `tests/parity/`: `seed.py` loads deterministic data; run Python ElastAlert 2.31.0 and this binary with `--debug --start 2026-10-01T08:00:00Z --end 2026-10-01T10:05:00Z`, then `diff.py py.log rs.log`. The alerts must be identical. Re-run this after any change to rule types, query planning or alert text.
 - `tests/alerters/sink.py`: local SMTP + HTTP receiver for the email/slack/post/command alerters and retry behaviour.
-- `bench/`: 400k-document dataset and 500-rule folder for the performance numbers in the README.
+- `bench/`: 400k-document dataset and 500-rule folder for the performance numbers in `docs/source/differences.rst`.
 
 Unit tests live in `#[cfg(test)] mod tests` at the bottom of each `src/*.rs`. `tests/golden/*.txt` are summary tables printed by upstream, compared byte for byte via `include_str!` in `src/alert.rs`.
 
 ## Architecture
 
-Single crate, single binary. Process model (see `replica/architecture.md` for the original design rationale; it is a plan and may differ from the code in details such as logging crates):
+Single crate, single binary. Process model:
 
 - `main.rs`: CLI (clap, flag names copied from upstream like `--pin_rules`), startup recovery of pending alerts/aggregations from the writeback index, one tokio task per rule (`rule_task`), hot-reload loop (file hashes of rules + imports; a reloaded rule keeps its state), graceful shutdown (finish running rules, flush writeback, 10 s cap).
 - `engine.rs`: one rule run. Plans the time range, queries pages, feeds the rule type, then silence/realert, aggregation groups, enhancement (top counts, `_mget` of the full doc for matches only), and per-alerter delivery with backoff retry. `RuleState` is owned by its task; `Ctx` holds the only shared things: `Es` client, `Silences` (in-memory, refreshed every `run_every`), writeback channel.
@@ -42,5 +42,5 @@ Error model: ordinary errors (ES down, bad query, alerter failure) are logged an
 
 ## Project records
 
-- `README.md` is the user-facing coverage contract: tables of supported / rejected / ignored config keys, rule options, alerters, and deliberate differences from ElastAlert 2. Update it when behaviour or coverage changes.
-- `replica/features.csv`: every ElastAlert 2 feature with its status here. `replica/build-log.md`: per-milestone log of what was done, measured and found. `replica/recon.md`: notes on the upstream source.
+- `docs/source/` (Sphinx, published at https://elastalert3.neopipe.fr) is the user-facing coverage contract: the ElastAlert 2 documentation with every difference in a red `.. admonition:: ElastAlert 3` / `:class: ea3` note, and `differences.rst` listing new, changed and unsupported features. Update it when behaviour or coverage changes. Build: `sphinx-build -W -b html docs/source /tmp/html` (requirements in `docs/requirements.txt`); deploy: `docs/compose.yaml`.
+- `README.md` stays short: pitch, quick start, links to the docs.

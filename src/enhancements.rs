@@ -1,7 +1,7 @@
 //! `match_enhancements`: modules that change or drop a match before it is alerted.
 //!
 //! ElastAlert 2 loads Python classes here; those cannot run. Instead each entry names a module compiled into the
-//! binary: upstream's built-in `TimeEnhancement`, or a native module `rust.<name>` (see `docs/enhancements.md`).
+//! binary: upstream's built-in `TimeEnhancement`, or a native module `rust.<name>` (see https://elastalert3.neopipe.fr/enhancements.html).
 //! A new module is a type implementing [`Enhancement`] plus one line in [`REGISTRY`].
 
 use crate::field::{self, py_str};
