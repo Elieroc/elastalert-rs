@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-horizontal-dark.png">
+    <img src="docs/assets/logo-horizontal-light.png" alt="elastalert3: alerting for Elasticsearch" width="520">
+  </picture>
+</p>
+
 # elastalert-rs
 
 A Rust rewrite of the core of [ElastAlert 2](https://github.com/jertel/elastalert2): a daemon that queries

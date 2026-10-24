@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1056 320" width="1056" height="320">
+  <g transform="translate(24,24) scale(0.53125)">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16213a"/><stop offset="1" stop-color="#0b1222"/>
+    </linearGradient>
+    <linearGradient id="bell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd166"/><stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <clipPath id="bellClip">
+      <path d="M256 132C186 132 152 190 152 258V318L122 356H390L360 318V258C360 190 326 132 256 132Z"/>
+    </clipPath>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- ondes d'alerte -->
+  <g fill="none" stroke="#2dd4bf" stroke-width="14" stroke-linecap="round" opacity="0.9">
+    <path d="M118 168A150 150 0 0 0 92 256"/>
+    <path d="M394 168A150 150 0 0 1 420 256"/>
+  </g>
+  <!-- cloche -->
+  <circle cx="256" cy="120" r="20" fill="url(#bell)"/>
+  <path d="M256 132C186 132 152 190 152 258V318L122 356H390L360 318V258C360 190 326 132 256 132Z" fill="url(#bell)"/>
+  <!-- signal / métrique dans la cloche -->
+  <g clip-path="url(#bellClip)">
+    <polyline points="140,292 196,292 216,262 236,312 262,196 286,292 372,292"
+      fill="none" stroke="#0b1222" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <!-- battant -->
+  <path d="M222 372A34 34 0 0 0 290 372Z" fill="#2dd4bf"/>
+  <!-- badge 3 -->
+  <circle cx="376" cy="148" r="58" fill="#ef4444" stroke="#0f182c" stroke-width="12"/>
+  <text x="376" y="174" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-weight="800" font-size="76" fill="#fff">3</text>
+</g>
+  <text x="330" y="196" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-weight="800" font-size="132" letter-spacing="-4" fill="#0b1222">elastalert<tspan fill="#ef4444">3</tspan></text>
+  <text x="336" y="256" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-weight="500" font-size="34" letter-spacing="6" fill="#2dd4bf">ALERTING FOR ELASTICSEARCH</text>
+</svg>
