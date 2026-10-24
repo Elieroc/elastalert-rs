@@ -10,7 +10,9 @@ RUN pip install --no-cache-dir -r docs/requirements.txt
 # conf.py reads the version from Cargo.toml.
 COPY Cargo.toml ./
 COPY docs ./docs
-RUN sphinx-build -W -b html docs/source /html
+RUN sphinx-build -W -b html docs/source /html \
+ && python docs/postbuild.py /html \
+ && python -m pagefind --site /html --root-selector 'div[itemprop=articleBody]' --exclude-selectors 'a.headerlink'
 
 # ---- runtime ----
 FROM nginx:1.27-alpine

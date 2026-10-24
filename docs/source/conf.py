@@ -32,4 +32,6 @@ html_logo = '../assets/logo-horizontal-dark.png'
 html_favicon = '../assets/icon.svg'
 html_static_path = ['_static']
 html_css_files = ['custom.css']
+# Search-as-you-type modal over the Pagefind index built after Sphinx (see docs/Dockerfile).
+html_js_files = ['search-modal.js']
 htmlhelp_basename = 'elastalertdoc'
