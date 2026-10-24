@@ -1,8 +1,19 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-horizontal-dark.png">
-    <img src="docs/assets/logo-horizontal-light.png" alt="elastalert3: alerting for Elasticsearch" width="520">
+    <img src="docs/assets/logo-horizontal-light.png" alt="elastalert3: alerting for Elasticsearch" width="100%">
   </picture>
+</p>
+
+<p align="center">
+  <a href="https://elastalert3.neopipe.fr"><img src="https://img.shields.io/badge/docs-elastalert3.neopipe.fr-2980b9" alt="Documentation"></a>
+  <img src="https://img.shields.io/badge/version-3.2.0-e5484d" alt="Version 3.2.0">
+  <img src="https://img.shields.io/badge/status-beta-orange" alt="Status: beta">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/rust-1.88%2B%20%C2%B7%20edition%202024-dea584?logo=rust" alt="Rust 1.88+, edition 2024">
+  <img src="https://img.shields.io/badge/Elasticsearch-7.x%20%7C%208.x-005571?logo=elasticsearch" alt="Elasticsearch 7.x | 8.x">
+  <img src="https://img.shields.io/badge/OpenSearch-2.x-005eb8?logo=opensearch" alt="OpenSearch 2.x">
+  <img src="https://img.shields.io/badge/ElastAlert%202-drop--in%20compatible-2ec4b6" alt="ElastAlert 2 drop-in compatible">
 </p>
 
 # elastalert3
