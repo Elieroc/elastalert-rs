@@ -199,6 +199,7 @@ pub enum RuleType {
     Cardinality(Cardinality),
     MetricAgg(MetricAgg),
     Percentage(Percentage),
+    Correlation(Correlation),
 }
 
 impl RuleType {
@@ -214,6 +215,7 @@ impl RuleType {
             Kind::MetricAggregation => RuleType::MetricAgg(MetricAgg::new(rule)),
             Kind::PercentageMatch => RuleType::Percentage(Percentage::new(rule)),
             Kind::SpikeAggregation => RuleType::Spike(Spike::new(rule)),
+            Kind::Correlation => RuleType::Correlation(Correlation::new(rule)),
         })
     }
 
@@ -234,7 +236,22 @@ impl RuleType {
             RuleType::Compare(c) => c.add_data(rule, events, matches),
             RuleType::NewTerm(n) => n.add_data(rule, events, matches),
             RuleType::Cardinality(c) => c.add_data(rule, events, matches),
-            RuleType::MetricAgg(_) | RuleType::Percentage(_) => {}
+            // Correlation events arrive tagged with their step, through `add_correlation`.
+            RuleType::MetricAgg(_) | RuleType::Percentage(_) | RuleType::Correlation(_) => {}
+        }
+    }
+
+    /// Events of every step of a `correlation` rule for one query range, oldest first (equal times in step order).
+    pub fn add_correlation(&mut self, rule: &Rule, events: Vec<(usize, Event)>, matches: &mut Vec<Doc>) {
+        if let RuleType::Correlation(c) = self {
+            c.add_events(rule, events, matches);
+        }
+    }
+
+    /// `correlation`: matches completing at or before `ts` were alerted before a restart; replaying them only rebuilds state.
+    pub fn suppress_until(&mut self, ts: Ts) {
+        if let RuleType::Correlation(c) = self {
+            c.suppress_until = Some(ts);
         }
     }
 
@@ -283,6 +300,7 @@ impl RuleType {
             RuleType::Spike(s) => s.garbage_collect(rule, ts, matches),
             RuleType::Flatline(f) => f.garbage_collect(rule, ts, matches),
             RuleType::Cardinality(c) => c.garbage_collect(rule, ts, matches),
+            RuleType::Correlation(c) => c.garbage_collect(rule, ts, matches),
             _ => {}
         }
     }
@@ -356,6 +374,7 @@ impl RuleType {
                     None => format!("Less than {} unique {}(s) occurred since last alert or between {start} and {end}\n\n", py_num(c.min.unwrap_or(0.0)), c.field),
                 }
             }
+            RuleType::Correlation(c) => c.match_str(rule, m, ts_fmt),
             RuleType::MetricAgg(a) => {
                 let shown = m.get(&a.key).map_or_else(|| "None".into(), |v| rule.raw.get("metric_format_string").and_then(Value::as_str).map_or_else(|| py_str(v), |f| format_number(f, v)));
                 let opt = |k: &str| rule.raw.get(k).map_or_else(|| "None".into(), py_str);
@@ -1183,6 +1202,167 @@ impl Cardinality {
     }
 }
 
+/// Progress of one pivot value through the steps of a `correlation` rule.
+struct Chain {
+    /// Time of the first event; the window `timeframe` is measured from here.
+    first_ts: Ts,
+    /// Ordered rules: the step the chain waits for.
+    next: usize,
+    steps: Vec<StepRec>,
+}
+
+#[derive(Clone, Default)]
+struct StepRec {
+    count: u64,
+    first: Ts,
+    last: Ts,
+    /// The newest event of the step.
+    doc: Option<Doc>,
+}
+
+/// `correlation`: the steps happen on the same `query_key` value within `timeframe` of the first one, optionally in order,
+/// with an optional last step that must not happen. One match per completed (or expired, for an absent step) chain.
+pub struct Correlation {
+    steps: Vec<(String, u64, bool)>,
+    ordered: bool,
+    chains: FxHashMap<String, Chain>,
+    /// Matches completing at or before this time were alerted by a previous run; replaying them only rebuilds state.
+    suppress_until: Option<Ts>,
+}
+
+impl Correlation {
+    fn new(rule: &Rule) -> Self {
+        let spec = rule.correlation.as_ref().expect("correlation rules always have steps");
+        Correlation {
+            steps: spec.steps.iter().map(|s| (s.name.clone(), s.num_events, s.absent)).collect(),
+            ordered: spec.ordered,
+            chains: FxHashMap::default(),
+            suppress_until: None,
+        }
+    }
+
+    fn absent_last(&self) -> bool {
+        self.steps.last().is_some_and(|s| s.2)
+    }
+
+    /// Steps that must be seen for the chain to complete (all but a trailing absent one).
+    fn required(&self) -> usize {
+        self.steps.len() - usize::from(self.absent_last())
+    }
+
+    fn add_events(&mut self, rule: &Rule, events: Vec<(usize, Event)>, matches: &mut Vec<Doc>) {
+        for (step, ev) in events {
+            self.add_event(rule, step, ev, matches);
+        }
+    }
+
+    fn add_event(&mut self, rule: &Rule, step: usize, ev: Event, matches: &mut Vec<Doc>) {
+        let key = group_key(rule, &ev.doc);
+        if self.chains.get(&key).is_some_and(|c| ev.ts - c.first_ts > tf(rule)) {
+            let chain = self.chains.remove(&key).expect("checked above");
+            self.expired(rule, &key, chain, matches);
+        }
+        if self.steps[step].2 {
+            // The forbidden event happened inside the window.
+            self.chains.remove(&key);
+            return;
+        }
+        let (n, required, absent_last) = (self.steps.len(), self.required(), self.absent_last());
+        if !self.chains.contains_key(&key) {
+            if self.ordered && step != 0 {
+                return;
+            }
+            self.chains.insert(key.clone(), Chain { first_ts: ev.ts, next: 0, steps: vec![StepRec::default(); n] });
+        }
+        let chain = self.chains.get_mut(&key).expect("inserted above");
+        if self.ordered && step != chain.next {
+            return;
+        }
+        let rec = &mut chain.steps[step];
+        if rec.count == 0 {
+            rec.first = ev.ts;
+        }
+        rec.count += 1;
+        rec.last = ev.ts;
+        rec.doc = Some(ev.doc.clone());
+        if self.ordered && rec.count >= self.steps[step].1 {
+            chain.next += 1;
+        }
+        let done = if self.ordered { chain.next >= required } else { (0..required).all(|i| chain.steps[i].count >= self.steps[i].1) };
+        if done && !absent_last {
+            let chain = self.chains.remove(&key).expect("present");
+            self.emit(rule, &key, &chain, Some(ev), None, matches);
+        }
+    }
+
+    /// A chain whose window ended: with an absent last step and everything before it seen, that is the match.
+    fn expired(&mut self, rule: &Rule, key: &str, chain: Chain, matches: &mut Vec<Doc>) {
+        if self.absent_last() && chain.next >= self.required() {
+            let absent = self.steps.last().map(|s| s.0.clone());
+            self.emit(rule, key, &chain, None, absent, matches);
+        }
+    }
+
+    fn emit(&self, rule: &Rule, key: &str, chain: &Chain, trigger: Option<Event>, absent: Option<String>, matches: &mut Vec<Doc>) {
+        let (completed, event) = match trigger {
+            Some(ev) => (ev.ts, ev),
+            None => {
+                // The deadline passed without the absent step: the match is the event that started the chain.
+                let first = &chain.steps[0];
+                (chain.first_ts + tf(rule), Event { ts: first.first, doc: first.doc.clone().unwrap_or_default() })
+            }
+        };
+        if self.suppress_until.is_some_and(|t| completed <= t) {
+            return;
+        }
+        let mut steps = Map::new();
+        for ((name, _, _), rec) in self.steps.iter().zip(&chain.steps) {
+            if rec.count == 0 {
+                continue;
+            }
+            let mut o = rec.doc.clone().unwrap_or_default();
+            o.insert("count".into(), json!(rec.count));
+            o.insert("first".into(), json!(to_iso(rec.first)));
+            o.insert("last".into(), json!(to_iso(rec.last)));
+            steps.insert(name.clone(), Value::Object(o));
+        }
+        let info = json!({
+            "key": key_value(key),
+            "first": to_iso(chain.first_ts),
+            "last": to_iso(completed),
+            "absent": absent,
+            "steps": steps,
+        });
+        let mut m = into_match(rule, event);
+        m.insert("correlation".into(), info);
+        matches.push(m);
+    }
+
+    /// Drops chains whose window has ended; an absent last step turns the armed ones into matches.
+    fn garbage_collect(&mut self, rule: &Rule, ts: Ts, matches: &mut Vec<Doc>) {
+        let mut due: Vec<(Ts, String)> = self.chains.iter().filter(|(_, c)| ts - c.first_ts > tf(rule)).map(|(k, c)| (c.first_ts, k.clone())).collect();
+        due.sort();
+        for (_, key) in due {
+            if let Some(chain) = self.chains.remove(&key) {
+                self.expired(rule, &key, chain, matches);
+            }
+        }
+    }
+
+    fn match_str(&self, rule: &Rule, m: &Doc, ts_fmt: Option<&str>) -> String {
+        let Some(info) = m.get("correlation") else { return String::new() };
+        let when = |k: &str| info.get(k).and_then(Value::as_str).and_then(crate::time::parse_iso).map(|t| pretty(t, rule.use_local_time, ts_fmt));
+        let (Some(first), Some(last)) = (when("first"), when("last")) else { return String::new() };
+        let key = info.get("key").map_or_else(|| "None".into(), py_str);
+        let names: Vec<&str> = self.steps.iter().take(self.required()).map(|s| s.0.as_str()).collect();
+        let list = names.join(if self.ordered { " -> " } else { ", " });
+        match info.get("absent").and_then(Value::as_str) {
+            Some(absent) => format!("Correlated events for {key} ({list}) started at {first} and no {absent} event followed within {}\n\n", pretty_duration(tf(rule))),
+            None => format!("Correlated events for {key} ({list}) between {first} and {last}\n\n"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1205,7 +1385,8 @@ mod tests {
     }
 
     fn rule_from(yaml: &str) -> Rule {
-        let dir = std::env::temp_dir().join(format!("ea-types-{}-{}", std::process::id(), yaml.len()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ea-types-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("r.yaml");
         std::fs::write(&f, format!("name: t\nindex: x\nalert: debug\n{yaml}")).unwrap();
@@ -1213,6 +1394,128 @@ mod tests {
         let rule = crate::rule::load(&f, &conf).unwrap();
         std::fs::remove_dir_all(dir).ok();
         rule
+    }
+
+    const MIN: Ts = 60_000_000;
+
+    fn corr(extra: &str) -> (Rule, RuleType) {
+        let steps = "correlation_steps:\n- {name: tool, filter: [{term: {k: tool}}]}\n- {name: outbound, filter: [{term: {k: net}}]}\n";
+        let rule = rule_from(&format!("type: correlation\nquery_key: host.name\ntimeframe: {{hours: 1}}\n{steps}{extra}"));
+        let rt = RuleType::new(&rule).unwrap();
+        (rule, rt)
+    }
+
+    fn cev(step: usize, host: &str, minute: i64) -> (usize, Event) {
+        let ts = 1_700_000_000_000_000 + minute * MIN;
+        (step, Event { ts, doc: Doc::from_iter([("host".to_string(), json!({"name": host})), ("@timestamp".into(), json!(to_iso(ts))), ("who".into(), json!(format!("{host}-{step}-{minute}")))]) })
+    }
+
+    fn feed(rule: &Rule, rt: &mut RuleType, events: Vec<(usize, Event)>) -> Vec<Doc> {
+        let mut out = Vec::new();
+        rt.add_correlation(rule, events, &mut out);
+        out
+    }
+
+    #[test]
+    fn correlation_ordered_matches_once_per_chain() {
+        let (rule, mut rt) = corr("");
+        let m = feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 10)]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0]["who"], json!("a-1-10"), "the match is the event that completed the chain");
+        let info = &m[0]["correlation"];
+        assert_eq!(info["key"], json!("a"));
+        assert_eq!(info["steps"]["tool"]["who"], json!("a-0-0"));
+        assert_eq!(info["steps"]["tool"]["count"], json!(1));
+        assert_eq!(info["steps"]["outbound"]["host"], json!({"name": "a"}));
+        // The chain was reset: a second outbound alone is nothing.
+        assert!(feed(&rule, &mut rt, vec![cev(1, "a", 20)]).is_empty());
+        let text = rt.match_str(&rule, &m[0], None);
+        assert!(text.starts_with("Correlated events for a (tool -> outbound) between "), "{text}");
+    }
+
+    #[test]
+    fn correlation_ordered_needs_order_window_and_same_pivot() {
+        let (rule, mut rt) = corr("");
+        assert!(feed(&rule, &mut rt, vec![cev(1, "a", 0), cev(0, "a", 5)]).is_empty(), "wrong order");
+        let (rule, mut rt) = corr("");
+        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 61)]).is_empty(), "outside the window of the first step");
+        let (rule, mut rt) = corr("");
+        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "b", 5)]).is_empty(), "different pivot");
+        let (rule, mut rt) = corr("");
+        // The window is measured from the first step: a later start event does not move it.
+        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(0, "a", 50), cev(1, "a", 70)]).is_empty());
+        let (rule, mut rt) = corr("");
+        assert_eq!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 60)]).len(), 1, "exactly timeframe is inside");
+    }
+
+    #[test]
+    fn correlation_state_survives_between_runs_and_pivots_are_independent() {
+        let (rule, mut rt) = corr("");
+        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(0, "b", 1)]).is_empty());
+        let m = feed(&rule, &mut rt, vec![cev(1, "b", 5), cev(1, "a", 6)]);
+        assert_eq!(m.iter().map(|d| d["correlation"]["key"].clone()).collect::<Vec<_>>(), vec![json!("b"), json!("a")]);
+    }
+
+    #[test]
+    fn correlation_unordered_and_num_events() {
+        let (rule, mut rt) = corr("ordered: false\n");
+        assert_eq!(feed(&rule, &mut rt, vec![cev(1, "a", 0), cev(0, "a", 3)]).len(), 1);
+        let rule = rule_from("type: correlation\nquery_key: host.name\ntimeframe: {minutes: 15}\ncorrelation_steps:\n- {name: fail, num_events: 3, filter: [{term: {k: f}}]}\n- {name: ok, filter: [{term: {k: o}}]}\n");
+        let mut rt = RuleType::new(&rule).unwrap();
+        let events = vec![cev(0, "a", 0), cev(0, "a", 1), cev(1, "a", 2), cev(0, "a", 3), cev(1, "a", 4)];
+        let m = feed(&rule, &mut rt, events);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0]["who"], json!("a-1-4"), "the success before the third failure does not count");
+        assert_eq!(m[0]["correlation"]["steps"]["fail"]["count"], json!(3));
+    }
+
+    fn absent_rule() -> (Rule, RuleType) {
+        let rule = rule_from("type: correlation\nquery_key: host.name\ntimeframe: {hours: 2}\ncorrelation_steps:\n- {name: started, filter: [{term: {k: s}}]}\n- {name: finished, absent: true, filter: [{term: {k: e}}]}\n");
+        let rt = RuleType::new(&rule).unwrap();
+        (rule, rt)
+    }
+
+    #[test]
+    fn correlation_absent_step_fires_at_the_deadline() {
+        let (rule, mut rt) = absent_rule();
+        let mut out = Vec::new();
+        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(0, "b", 1), cev(1, "b", 30)]).is_empty());
+        rt.garbage_collect(&rule, 1_700_000_000_000_000 + 119 * MIN, &mut out);
+        assert!(out.is_empty(), "still inside the window");
+        rt.garbage_collect(&rule, 1_700_000_000_000_000 + 121 * MIN, &mut out);
+        assert_eq!(out.len(), 1, "only a lacks its end");
+        assert_eq!(out[0]["correlation"]["key"], json!("a"));
+        assert_eq!(out[0]["correlation"]["absent"], json!("finished"));
+        assert_eq!(out[0]["who"], json!("a-0-0"));
+        assert_eq!(out[0]["correlation"]["last"], json!(to_iso(1_700_000_000_000_000 + 120 * MIN)));
+        let text = rt.match_str(&rule, &out[0], None);
+        assert!(text.contains("no finished event followed within"), "{text}");
+        rt.garbage_collect(&rule, 1_700_000_000_000_000 + 200 * MIN, &mut out);
+        assert_eq!(out.len(), 1, "fires once");
+    }
+
+    #[test]
+    fn correlation_absent_step_fires_when_a_late_event_arrives() {
+        let (rule, mut rt) = absent_rule();
+        // The end shows up after the deadline: too late, the first chain is a match and the late event starts nothing.
+        let m = feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 130)]);
+        assert_eq!(m.len(), 1);
+        // A new start after the deadline opens a fresh chain.
+        let m = feed(&rule, &mut rt, vec![cev(0, "c", 0), cev(0, "c", 150)]);
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn correlation_replay_does_not_alert_twice() {
+        let (rule, mut rt) = corr("");
+        rt.suppress_until(1_700_000_000_000_000 + 10 * MIN);
+        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 10)]).is_empty());
+        assert_eq!(feed(&rule, &mut rt, vec![cev(0, "a", 11), cev(1, "a", 12)]).len(), 1);
+        // A chain started before the restart still completes after it.
+        let (rule, mut rt) = corr("");
+        rt.suppress_until(1_700_000_000_000_000 + 10 * MIN);
+        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 5)]).is_empty());
+        assert_eq!(feed(&rule, &mut rt, vec![cev(1, "a", 20)]).len(), 1);
     }
 
     fn matches_of(rule: &Rule, ts: Ts, payload: Value) -> Vec<Doc> {

@@ -10,7 +10,7 @@ use crate::field::{self, py_str};
 use crate::index;
 use crate::metrics::Metrics;
 use crate::querylang::{self, QueryLang};
-use crate::rule::{Aggregation, Rule, TsType};
+use crate::rule::{Aggregation, Kind, Rule, TsType};
 use crate::time::{Dur, MINUTE, SECOND, Ts, now, parse_iso, pretty, to_iso};
 use crate::types::{Event, RuleType, parse_ts, ts_value};
 use crate::writeback::{Kind as Wb, Writeback};
@@ -105,6 +105,9 @@ pub struct RuleState {
     bucket_offset: i64,
     /// Hash of `_id` -> event time, to skip hits already seen in overlapping windows.
     seen: FxHashMap<u64, Ts>,
+    /// `correlation`: the step being queried, and the tagged events (with their dedup hash) gathered for the range.
+    corr_step: Option<usize>,
+    corr_buf: Vec<(usize, Event, u64)>,
     /// Documents to query instead of ES (`test-rule --data`).
     pub mock: Option<Vec<Doc>>,
     /// `limit_execution`: whether a run has happened since the rule was (re)loaded.
@@ -150,6 +153,8 @@ impl RuleState {
             minimum_starttime: None,
             bucket_offset: 0,
             seen: FxHashMap::default(),
+            corr_step: None,
+            corr_buf: Vec::new(),
             mock: None,
             has_run_once: false,
             next_min_start: None,
@@ -174,6 +179,8 @@ impl RuleState {
             minimum_starttime: None,
             bucket_offset: 0,
             seen: FxHashMap::default(),
+            corr_step: None,
+            corr_buf: Vec::new(),
             mock: None,
             has_run_once: false,
             next_min_start: None,
@@ -188,6 +195,14 @@ impl RuleState {
     pub fn carry_over(&mut self, old: RuleState) {
         (self.starttime, self.previous_endtime, self.minimum_starttime, self.seen, self.pending, self.agg) =
             (old.starttime, old.previous_endtime, old.minimum_starttime, old.seen, old.pending, old.agg);
+        if self.rule.kind == Kind::Correlation
+            && let Some(prev) = old.previous_endtime
+        {
+            // Open chains were lost with the old rule type: read the window again, without alerting twice.
+            self.starttime = Some(prev - self.rule.timeframe.unwrap_or_default());
+            self.rtype.suppress_until(prev);
+            self.seen.clear();
+        }
         let n = self.alerters.len();
         self.pending.iter_mut().for_each(|p| p.done.resize(n, false));
         if self.rule.aggregation.is_none() {
@@ -301,6 +316,10 @@ impl RuleState {
             if scrolling { " (scrolling..)" } else { "" }
         );
         let events = self.process_hits(&mut hits)?;
+        if let Some(step) = self.corr_step {
+            self.stage_step_events(step, events);
+            return Ok(());
+        }
         let before = events.len();
         let fresh: Vec<Event> = events
             .into_iter()
@@ -320,6 +339,9 @@ impl RuleState {
     async fn run_query(&mut self, ctx: &Ctx, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
         if self.mock.is_some() {
             return self.run_mock(ctx, start, end, matches);
+        }
+        if self.rule.kind == Kind::Correlation {
+            return self.correlation_query(ctx, start, end, matches).await;
         }
         let index = self.index_for(start, end)?;
         if self.aggregating() {
@@ -345,14 +367,80 @@ impl RuleState {
         if let Some(lang) = self.rule.query_lang {
             return self.lang_query(ctx, lang, &index, start, end, matches).await;
         }
+        self.hit_search(ctx, &index, start, end, matches).await
+    }
+
+    /// Plain hit search over (start, end]: point in time when available, scroll otherwise.
+    async fn hit_search(&mut self, ctx: &Ctx, index: &str, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
         let body = self.query(start, end);
         if ctx.use_pit && ctx.es.supports_pit().await {
-            match ctx.es.pit_open(&index, "1m").await {
+            match ctx.es.pit_open(index, "1m").await {
                 Ok(id) => return self.pit_pages(ctx, start, end, body, id, matches).await,
                 Err(e) => log::warn!("rule {}: point in time unavailable ({e:#}), using scroll", self.rule.name),
             }
         }
-        self.scroll_pages(ctx, start, end, &index, body, matches).await
+        self.scroll_pages(ctx, start, end, index, body, matches).await
+    }
+
+    /// `correlation` rules: one search per step (its filter added to the rule's), all events merged by time and handed
+    /// to the rule type together. Dedup hashes are only recorded once every step succeeded, so a failed run reads the range again.
+    async fn correlation_query(&mut self, ctx: &Ctx, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
+        let spec = self.rule.correlation.clone().expect("correlation rules always have steps");
+        let (base_filter, base_index) = (self.rule.filter.clone(), self.rule.index.clone());
+        let mut result = Ok(());
+        for (i, step) in spec.steps.iter().enumerate() {
+            self.rule.filter = base_filter.iter().chain(&step.filter).cloned().collect();
+            self.rule.index = step.index.clone().unwrap_or_else(|| base_index.clone());
+            self.corr_step = Some(i);
+            result = async {
+                let index = self.index_for(start, end)?;
+                self.hit_search(ctx, &index, start, end, &mut Vec::new()).await
+            }
+            .await;
+            if result.is_err() {
+                break;
+            }
+        }
+        (self.rule.filter, self.rule.index, self.corr_step) = (base_filter, base_index, None);
+        let mut staged = std::mem::take(&mut self.corr_buf);
+        result?;
+        for (_, ev, hash) in &staged {
+            self.seen.insert(*hash, ev.ts);
+        }
+        staged.sort_by_key(|(step, ev, _)| (ev.ts, *step));
+        self.rtype.add_correlation(&self.rule, staged.into_iter().map(|(step, ev, _)| (step, ev)).collect(), matches);
+        Ok(())
+    }
+
+    /// Keeps the new events of a correlation step: the pivot value is mapped from the step's own field, events without one are skipped.
+    fn stage_step_events(&mut self, step: usize, events: Vec<Event>) {
+        let rule = &self.rule;
+        let step_key = rule.correlation.as_ref().and_then(|c| c.steps[step].query_key.clone());
+        let qk = rule.query_key.clone().unwrap_or_default();
+        let before = events.len();
+        let mut kept = 0;
+        for mut ev in events {
+            if let Some(sk) = &step_key
+                && let Some(v) = field::lookup(&ev.doc, sk).cloned()
+            {
+                ev.doc.insert(qk.clone(), v);
+            }
+            let parts = if rule.compound_query_key.is_empty() { std::slice::from_ref(&qk) } else { &rule.compound_query_key[..] };
+            if step_key.is_some() && !ev.doc.contains_key(&qk) || parts.iter().any(|k| field::lookup(&ev.doc, k).is_none_or(Value::is_null)) {
+                continue;
+            }
+            let hash = match ev.doc.get("_id").and_then(Value::as_str) {
+                Some(id) => id_hash(&format!("{step}\0{id}")),
+                None => 0,
+            };
+            if hash != 0 && self.seen.contains_key(&hash) {
+                self.dupes += 1;
+                continue;
+            }
+            kept += 1;
+            self.corr_buf.push((step, ev, hash));
+        }
+        log::debug!("Rule {}: step {step} kept {kept} of {before} events", rule.name);
     }
 
     /// EQL / ES|QL rules: one request per range, no paging (upstream cannot page them either), so results beyond
@@ -431,6 +519,9 @@ impl RuleState {
 
     /// Mock data (`test-rule --data`): same time filter as upstream's mock (`start <= ts < end`).
     fn run_mock(&mut self, ctx: &Ctx, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
+        if self.rule.kind == Kind::Correlation {
+            bail!("test-rule --data / --use-downloaded cannot replay correlation rules: each step is a search of its own");
+        }
         if self.aggregating() {
             bail!("test-rule --data / --use-downloaded cannot replay aggregation rule types (metric_aggregation, percentage_match, spike_aggregation)");
         }
@@ -593,6 +684,11 @@ impl RuleState {
             && let Some(last) = self.last_run_end(ctx).await
         {
             self.starttime = Some(self.overlap(last));
+            if self.rule.kind == Kind::Correlation {
+                // Chains in progress at the last run are rebuilt from the window before it, without alerting twice.
+                self.starttime = Some(last - self.rule.timeframe.unwrap_or_default());
+                self.rtype.suppress_until(last);
+            }
             self.sync_interval();
             self.minimum_starttime = self.starttime;
             return;

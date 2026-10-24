@@ -178,6 +178,7 @@ compound `query_key` / `aggregation_key` / `compare_key`, and environment variab
 | --- | --- |
 | `any`, `frequency`, `spike`, `flatline`, `blacklist`, `whitelist`, `change`, `new_term`, `cardinality` | supported |
 | `metric_aggregation`, `percentage_match`, `spike_aggregation` | supported, see [aggregation rule types](#aggregation-rule-types) |
+| `correlation` (**extension**, not in ElastAlert 2) | events of several searches on the same pivot within a window, see [correlation rule type](#correlation-rule-type) |
 | custom Python rule classes | **not possible** |
 
 `frequency`, `spike` and `flatline` also work with `use_count_query` and `use_terms_query`; `new_term` with `use_terms_query`.
@@ -195,6 +196,57 @@ As upstream, such a rule only queries whole `buffer_time` segments (`run_every` 
 Rejected at load: `use_count_query` / `use_terms_query`, `ingest_timestamp_field`, a compound `query_key` on `percentage_match`
 (upstream fails on it at the first match), `bucket_interval` on `spike_aggregation`.
 `test-rule --data` / `--use-downloaded` cannot replay them (they need Elasticsearch to aggregate).
+
+#### Correlation rule type
+
+`type: correlation` (**extension**: a rule using it does not load in ElastAlert 2) alerts when events matching several steps happen on the same
+`query_key` value (a machine, an IP, a user) within `timeframe` of the first one. Every step is a search of its own, so it also works on OpenSearch
+and across indices.
+
+```yaml
+name: Brute force followed by success
+type: correlation
+index: auth-*
+query_key: [user.name, source.ip]    # the pivot; a list is a compound key, as elsewhere
+timeframe: {minutes: 15}             # measured from the first event of the chain
+correlation_steps:
+- name: failures
+  num_events: 10                     # at least 10 events before the next step counts (default 1)
+  filter:
+  - term: {event.outcome: failure}
+- name: success
+  filter:
+  - term: {event.outcome: success}
+alert_text: "{0} compromised from {1}"
+alert_text_args: [user.name, source.ip]
+alert: [email]
+```
+
+| Option | |
+| --- | --- |
+| `correlation_steps` | at least two steps, each with a `name` (letters, digits, `_`, `-`; unique) and a non-empty Query DSL `filter` list. The rule's own `filter` is added to every step |
+| step `num_events` | events needed in the step (default 1) |
+| step `index` | search another index for this step (default: the rule's `index`) |
+| step `query_key` | field holding the pivot in this step's documents when it is not named like the rule's single-field `query_key` (the value is copied under the rule's name) |
+| step `absent: true` | last step only: the chain matches when nothing of this step happened within `timeframe` of the first event |
+| `ordered` | `true` (default): steps in sequence. `false`: any order, every step must be reached. Not with `absent` |
+
+Behaviour:
+- A chain starts with the first event of the first step (any step when `ordered: false`) and expires `timeframe` after it, whatever happens in between;
+  a later event of the first step does not move the window. Events of a step other than the awaited one are ignored.
+- One alert per chain, then the pivot starts over. `realert` and `silence` work on the pivot as for other types.
+- Documents without a value for the pivot are skipped.
+- The match is the document that completed the chain (for `absent`, the document that started it, and the alert goes out once the window is over).
+  `@timestamp` is that document's. A `correlation` field is added: `key`, `first`, `last`, `absent` (the missing step or `null`) and `steps.<name>`,
+  the newest document of each step with `count`, `first` and `last` laid over its fields. `alert_text_args: [correlation.steps.failures.source.ip]` works.
+- State is kept in memory. After a restart or a rule reload the last `timeframe` is read again to rebuild open chains; chains that already completed before are not alerted twice.
+  A fresh start (no previous run) reads `buffer_time` back, as other types.
+- Whole documents are fetched (no field projection).
+
+Rejected at load: fewer than two steps, duplicate or invalid step names, unknown step options, a missing `query_key` or `timeframe`, `absent` anywhere but last or with `ordered: false`
+or `num_events`, `eql` / `esql` filters, `use_count_query`, `use_terms_query`, a step `query_key` with a compound rule `query_key`.
+`test-rule --data` / `--use-downloaded` cannot replay it (each step needs its own search).
+Late-indexed documents (older than the end of the last run) are missed, as for other types.
 
 ### Common rule options
 
@@ -346,13 +398,13 @@ Deliberate or unavoidable differences in behaviour:
 | Log lines | `INFO:elastalert:...` per call | same text; the two lines of a debug alert are emitted in one call so parallel rules do not interleave them |
 | Concurrency | thread pool | one task per rule, `max_threads` limits concurrent runs |
 | `disabled rules` log | printed every cycle | printed only when some exist |
-| EQL sequence / join queries | no events, silently | the run fails with an error (only event queries work) |
+| EQL sequence / join queries | no events, silently | the run fails with an error (only event queries work); use the `correlation` rule type instead |
 | EQL `timestamp_field` | always the Elasticsearch default `@timestamp` | the rule's `timestamp_field` is sent when it is not `@timestamp` |
 | Discover link that cannot be built (bad `kibana_url`, shortener unreachable) | the rule run fails and the alert is not sent | an error is logged and the alert goes out without the link |
 | Discover filters | `meta.value` keeps the key order of the YAML | keys are sorted (display text of the filter pill only) |
 | `TimeEnhancement` with `frequency`, `spike`, `flatline`, `cardinality` | the sentence about the time range is built from the rewritten `@timestamp`, with a time zone that depends on the host | the sentence is left out, because the timestamp is no longer one |
 
-New options that ElastAlert 2 does not have: `ingest_timestamp_field`, `fetch_full_source`, `use_pit`, `validate`, `--es_debug_trace` with responses, the `rust.*` match enhancements (a rule using one does not load in ElastAlert 2).
+New options that ElastAlert 2 does not have: the `correlation` rule type (`correlation_steps`, `ordered`), `ingest_timestamp_field`, `fetch_full_source`, `use_pit`, `validate`, `--es_debug_trace` with responses, the `rust.*` match enhancements (a rule using one does not load in ElastAlert 2).
 
 ## Performance
 
