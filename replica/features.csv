@@ -66,6 +66,7 @@ alert_text / alert_text_args / alert_text_kw / alert_text_type / alert_subject(_
 Jinja alert text (alert_text_type alert_text_jinja jinja_template_path jinja_root_name jinja_filters),alert text,should,yes,yes,minijinja; alert_subject too; custom jinja_filters (Python modules) rejected at load
 Default match body text (rule name + get_match_str + sorted key: value),alert text,must,yes,yes,exact format matters for downstream parsers; parity-tested 81/81
 $rule_field$ references in alerter config,alerting,should,yes,yes,
+Per-alerter options in alert (alert: [{slack: {...}}]),alerting,must,yes,yes,"entry options laid over the rule for that alerter; same alerter twice supported (alerters_sent labels name, name#2); rejected at load when malformed"
 Alerter email (smtp host/port/ssl/starttls auth file cc bcc html images email_from_field),alerter,must,yes,partial,"smtp host/port/ssl/starttls/auth file, cc, bcc, html, reply-to, email_from_field; no images, no client cert"
 Alerter slack (webhook(s) attachments fields channel override proxy),alerter,must,yes,partial,"webhook(s), channels, attachment fields and styling, aggregation summary in a code block, discover attachments; no jira attachment"
 Alerter post / http_post (payload map static payload headers proxy ca),alerter,must,yes,yes,"payload map, static payload, headers, proxy, CA, timeout"

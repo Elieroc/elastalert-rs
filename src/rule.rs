@@ -99,6 +99,8 @@ pub struct Rule {
     pub sync_bucket_interval: bool,
     pub allow_buffer_time_overlap: bool,
     pub alerts: Vec<String>,
+    /// Per-alerter options of `alert: [{slack: {slack_webhook_url: ...}}]`, parallel to `alerts` (`None` for a plain name).
+    pub alert_configs: Vec<Option<Map<String, Value>>>,
     /// `limit_execution`: cron expression of the periods the rule is active in.
     pub limit_execution: Option<String>,
     /// `limit_execution_coverage`: do not catch up on the time skipped between two active periods.
@@ -111,6 +113,64 @@ pub struct Rule {
     pub query_lang: Option<QueryLang>,
     /// The merged rule document; alert text and alerters read arbitrary keys from it.
     pub raw: Map<String, Value>,
+}
+
+/// The Jinja source of `alert_text` (or `jinja_template_path`) when `alert_text_type` is `alert_text_jinja`.
+fn jinja_template_of(raw: &Map<String, Value>) -> Result<Option<String>> {
+    if raw.get("alert_text_type").and_then(Value::as_str) != Some("alert_text_jinja") {
+        return Ok(None);
+    }
+    let src = match raw.get("jinja_template_path").and_then(Value::as_str) {
+        Some(p) => std::fs::read_to_string(p).with_context(|| format!("reading jinja_template_path {p}"))?,
+        None => raw.get("alert_text").and_then(Value::as_str).unwrap_or("").to_string(),
+    };
+    crate::alert::check_jinja(&src).map_err(|e| anyhow::anyhow!("invalid jinja template: {e}"))?;
+    Ok(Some(src))
+}
+
+/// One element of `alert:`: `name`, or `{name: {option: value, ...}}`.
+fn alert_entry(x: &Value) -> Result<(String, Option<Map<String, Value>>)> {
+    match x {
+        Value::String(s) => Ok((s.clone(), None)),
+        Value::Object(m) if m.len() == 1 => {
+            let (name, config) = m.iter().next().expect("one entry");
+            match config {
+                Value::Object(c) => Ok((name.clone(), Some(c.clone()))),
+                _ => bail!("the options of the alert {name} must be a map"),
+            }
+        }
+        Value::Object(_) => bail!("an alert entry must be a name or a map with one alert name"),
+        _ => bail!("alert entries must be names or maps like {{slack: {{slack_webhook_url: ...}}}}"),
+    }
+}
+
+impl Rule {
+    /// The rule as the alerter at position `i` sees it: the options of its `alert:` entry laid over the rule's own
+    /// (upstream's `normalize_config`). Only alert options and alert text are meant to change this way: query and
+    /// rule type options are read once, from the rule itself.
+    pub fn with_alert_config(&self, config: &Map<String, Value>) -> Result<Rule> {
+        let mut r = self.clone();
+        r.raw.extend(config.clone());
+        resolve_refs(&mut r.raw);
+        if let Some(name) = r.raw.get("name").and_then(Value::as_str) {
+            r.name = name.to_string();
+        }
+        r.jinja_template = jinja_template_of(&r.raw)?;
+        Ok(r)
+    }
+
+    /// What `alerters_sent` stores for each alerter: its name, and `name#2`, `name#3` ... for repeats of the same alerter.
+    pub fn alert_labels(&self) -> Vec<String> {
+        let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        self.alerts
+            .iter()
+            .map(|a| {
+                let n = seen.entry(a.as_str()).or_insert(0);
+                *n += 1;
+                if *n == 1 { a.clone() } else { format!("{a}#{n}") }
+            })
+            .collect()
+    }
 }
 
 pub fn is_yaml(p: &Path) -> bool {
@@ -446,16 +506,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         Some(Value::Array(a)) => Some(a.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
         Some(_) => bail!("include_fields option must be a list"),
     };
-    let jinja_template = if raw.get("alert_text_type").and_then(Value::as_str) == Some("alert_text_jinja") {
-        let src = match raw.get("jinja_template_path").and_then(Value::as_str) {
-            Some(p) => std::fs::read_to_string(p).with_context(|| format!("reading jinja_template_path {p}"))?,
-            None => raw.get("alert_text").and_then(Value::as_str).unwrap_or("").to_string(),
-        };
-        crate::alert::check_jinja(&src).map_err(|e| anyhow::anyhow!("invalid jinja template: {e}"))?;
-        Some(src)
-    } else {
-        None
-    };
+    let jinja_template = jinja_template_of(&raw)?;
 
     // What to ask ES for. Types that treat every hit as a match need whole documents; the others
     // fetch only the fields they use and get the full document for matches later (`_mget`).
@@ -491,20 +542,14 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     include.dedup();
     let enrich = !full && !kind.is_agg_query();
 
-    let mut alerts = match &raw["alert"] {
-        Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|x| match x {
-                Value::String(s) => Some(s.clone()),
-                Value::Object(m) => m.keys().next().cloned(),
-                _ => None,
-            })
-            .collect(),
+    let mut entries: Vec<(String, Option<Map<String, Value>>)> = match &raw["alert"] {
+        Value::String(s) => vec![(s.clone(), None)],
+        Value::Array(a) => a.iter().map(alert_entry).collect::<Result<_>>()?,
         _ => bail!("alert must be a string or a list"),
     };
     // Upstream's `alerts_order`: jira runs first, so email and slack can link its ticket. The sort is stable.
-    alerts.sort_by_key(|a| if a == "jira" { 0 } else { 1 });
+    entries.sort_by_key(|(name, _)| if name == "jira" { 0 } else { 1 });
+    let (alerts, alert_configs): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
 
     resolve_refs(&mut raw);
     let mut filter = match raw.get("filter") {
@@ -576,6 +621,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         timeframe,
         num_events,
         alerts,
+        alert_configs,
         raw,
     })
 }
@@ -692,6 +738,58 @@ mod tests {
         std::fs::write(&file, format!("name: {name}\ntype: any\nindex: logs-*\nalert: debug\n{extra}")).unwrap();
         let conf = Config::load_with_defaults(&dir.join("none.yaml")).unwrap();
         load(&file, &conf)
+    }
+
+    fn load_alert_list(name: &str, alert_yaml: &str, extra: &str) -> Result<Rule> {
+        let dir = std::env::temp_dir().join(format!("ea-rule-alerts-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("r.yaml");
+        std::fs::write(&file, format!("name: {name}\ntype: any\nindex: logs-*\nalert: {alert_yaml}\n{extra}")).unwrap();
+        let conf = Config::load_with_defaults(&dir.join("none.yaml")).unwrap();
+        let r = load(&file, &conf);
+        std::fs::remove_dir_all(dir).ok();
+        r
+    }
+
+    #[test]
+    fn alerts_with_their_own_options() {
+        let r = load_alert_list("own", "[{post: {http_post_url: 'http://a'}}, debug, {post: {http_post_url: 'http://b', alert_subject: Other}}]", "http_post_url: http://rule\nalert_subject: Rule subject\n").unwrap();
+        assert_eq!(r.alerts, ["post", "debug", "post"]);
+        assert_eq!(r.alert_labels(), ["post", "debug", "post#2"]);
+        assert!(r.alert_configs[1].is_none());
+        // each alerter sees the rule with its entry's options laid over it
+        let urls: Vec<_> = [0, 2].iter().map(|&i| {
+            let eff = r.with_alert_config(r.alert_configs[i].as_ref().unwrap()).unwrap();
+            let info = crate::alerters::Alerter::from_rule("post", &eff).unwrap().info();
+            (info["http_post_webhook_url"].clone(), eff.raw["alert_subject"].clone())
+        }).collect();
+        assert_eq!(urls, [(json!(["http://a"]), json!("Rule subject")), (json!(["http://b"]), json!("Other"))]);
+        // and the rule's own options are untouched
+        assert_eq!(r.raw["http_post_url"], json!("http://rule"));
+    }
+
+    #[test]
+    fn alert_entry_options_resolve_references_and_jinja() {
+        let r = load_alert_list("refs", "[{debug: {alert_text_type: alert_text_jinja, alert_text: 'hello {{ who }}', name: renamed, copy: $from_rule$}}]", "from_rule: copied\n").unwrap();
+        let eff = r.with_alert_config(r.alert_configs[0].as_ref().unwrap()).unwrap();
+        assert_eq!((eff.raw["copy"].clone(), eff.name.as_str(), eff.jinja_template.as_deref()), (json!("copied"), "renamed", Some("hello {{ who }}")));
+        assert_eq!(r.name, "refs");
+        assert!(r.jinja_template.is_none());
+        let bad = load_alert_list("badjinja", "[debug]", "").unwrap().with_alert_config(json!({"alert_text_type": "alert_text_jinja", "alert_text": "{{ oops"}).as_object().unwrap());
+        assert!(bad.err().unwrap().to_string().contains("invalid jinja template"));
+    }
+
+    #[test]
+    fn malformed_alert_entries_are_rejected() {
+        for (yaml, expect) in [
+            ("[{post: 1}]", "must be a map"),
+            ("[{post: {}, debug: {}}]", "one alert name"),
+            ("[5]", "names or maps"),
+            ("[{post: null}]", "must be a map"),
+        ] {
+            let err = load_alert_list("bad", yaml, "").err().unwrap().to_string();
+            assert!(err.contains(expect), "{yaml}: {err}");
+        }
     }
 
     #[test]

@@ -208,7 +208,7 @@ async fn recover_pending(ctx: &Ctx, index: &str, states: &mut [RuleState]) {
             st.restore_pending(Pending {
                 id,
                 matches,
-                done: st.rule.alerts.iter().map(|k| sent.contains(&k.as_str())).collect(),
+                done: st.rule.alert_labels().iter().map(|k| sent.contains(&k.as_str())).collect(),
                 attempts: s["retry_count"].as_u64().unwrap_or(0) as u32,
                 next_try: 0,
                 alert_time,

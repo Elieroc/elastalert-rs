@@ -94,6 +94,8 @@ pub struct RuleState {
     pub rule: Rule,
     rtype: RuleType,
     alerters: Vec<Alerter>,
+    /// The rule as each alerter sees it, when its `alert:` entry has options of its own.
+    alert_rules: Vec<Option<Rule>>,
     pub pending: Vec<Pending>,
     agg: FxHashMap<String, AggGroup>,
     starttime: Option<Ts>,
@@ -129,10 +131,17 @@ fn backoff(attempts: u32) -> Dur {
 
 impl RuleState {
     pub fn new(rule: Rule) -> Result<Self> {
-        let alerters = rule.alerts.iter().map(|k| Alerter::from_rule(k, &rule)).collect::<Result<Vec<_>>>()?;
+        let mut alerters = Vec::new();
+        let mut alert_rules = Vec::new();
+        for (name, config) in rule.alerts.iter().zip(&rule.alert_configs) {
+            let own = config.as_ref().map(|c| rule.with_alert_config(c)).transpose().with_context(|| format!("options of the alert {name}"))?;
+            alerters.push(Alerter::from_rule(name, own.as_ref().unwrap_or(&rule))?);
+            alert_rules.push(own);
+        }
         Ok(RuleState {
             rtype: RuleType::new(&rule)?,
             alerters,
+            alert_rules,
             pending: Vec::new(),
             agg: FxHashMap::default(),
             rule,
@@ -156,6 +165,7 @@ impl RuleState {
         RuleState {
             rtype: RuleType::new(rule).unwrap_or(RuleType::Any),
             alerters: vec![],
+            alert_rules: vec![],
             pending: vec![],
             agg: FxHashMap::default(),
             rule: rule.clone(),
@@ -889,12 +899,14 @@ impl RuleState {
     async fn deliver(&self, ctx: &Ctx, p: &mut Pending) -> bool {
         let pipeline = crate::alerters::Pipeline::default();
         pipeline.lock().expect("fresh mutex").insert("alert_time".into(), json!(to_iso(p.alert_time)));
-        let view = View { rule: &self.rule, rtype: &self.rtype, ts_fmt: ctx.ts_fmt.as_deref(), pipeline: &pipeline };
         let mut all = true;
+        let labels = self.rule.alert_labels();
         for (i, a) in self.alerters.iter().enumerate() {
             if p.done[i] {
                 continue;
             }
+            let rule = self.alert_rules[i].as_ref().unwrap_or(&self.rule);
+            let view = View { rule, rtype: &self.rtype, ts_fmt: ctx.ts_fmt.as_deref(), pipeline: &pipeline };
             match a.alert(&view, &p.matches).await {
                 Ok(()) => {
                     p.done[i] = true;
@@ -905,7 +917,7 @@ impl RuleState {
                     p.exception = format!("{e:#}");
                     self.alerts_not_sent.fetch_add(1, Ordering::Relaxed);
                     ctx.metrics.error();
-                    ctx.writeback.error(format!("Error while running alert {}: {e:#}", a.kind()), json!({"rule": self.rule.name})).await;
+                    ctx.writeback.error(format!("Error while running alert {}: {e:#}", labels[i]), json!({"rule": self.rule.name})).await;
                 }
             }
         }
@@ -926,7 +938,8 @@ impl RuleState {
     /// Writes the alert doc(s) for `p`: one per match, same `_id` every time so updates overwrite.
     /// An aggregated alert is one doc (the first match); the other matches' docs are deleted once it is fully sent.
     async fn write_alert(&self, ctx: &Ctx, p: &mut Pending) {
-        let sent: Vec<&str> = self.alerters.iter().zip(&p.done).filter(|(_, d)| **d).map(|(a, _)| a.kind()).collect();
+        let labels = self.rule.alert_labels();
+        let sent: Vec<&str> = labels.iter().zip(&p.done).filter(|(_, d)| **d).map(|(l, _)| l.as_str()).collect();
         let complete = p.done.iter().all(|d| *d);
         let grouped = !p.child_ids.is_empty();
         for (n, m) in p.matches.iter().enumerate() {

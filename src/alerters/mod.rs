@@ -180,55 +180,6 @@ impl Alerter {
         })
     }
 
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Alerter::Debug => "debug",
-            Alerter::Email(_) => "email",
-            Alerter::Slack(_) => "slack",
-            Alerter::Post(_) => "post",
-            Alerter::Command(_) => "command",
-            Alerter::Post2(_) => "post2",
-            Alerter::Mattermost(_) => "mattermost",
-            Alerter::PowerAutomate(_) => "ms_power_automate",
-            Alerter::Discord(_) => "discord",
-            Alerter::Telegram(_) => "telegram",
-            Alerter::GoogleChat(_) => "googlechat",
-            Alerter::RocketChat(_) => "rocketchat",
-            Alerter::Webex(_) => "webex_webhook",
-            Alerter::MatrixHookshot(_) => "matrixhookshot",
-            Alerter::Chatwork(_) => "chatwork",
-            Alerter::DingTalk(_) => "dingtalk",
-            Alerter::Gitter(_) => "gitter",
-            Alerter::Lark(_) => "lark",
-            Alerter::Line(_) => "line",
-            Alerter::WorkWechat(_) => "workwechat",
-            Alerter::Yzj(_) => "yzj",
-            Alerter::Alerta(_) => "alerta",
-            Alerter::Alertmanager(_) => "alertmanager",
-            Alerter::Datadog(_) => "datadog",
-            Alerter::Flashduty(_) => "flashduty",
-            Alerter::OpsGenie(_) => "opsgenie",
-            Alerter::PagerDuty(_) => "pagerduty",
-            Alerter::PagerTree(_) => "pagertree",
-            Alerter::VictorOps(_) => "victorops",
-            Alerter::Zabbix(_) => "zabbix",
-            Alerter::Gelf(_) => "gelf",
-            Alerter::Iris(_) => "iris",
-            Alerter::ServiceNow(_) => "servicenow",
-            Alerter::Hive(_) => "hivealerter",
-            Alerter::Indexer(_) => "indexer",
-            Alerter::Jira(_) => "jira",
-            Alerter::Ses(_) => "ses",
-            Alerter::Sns(_) => "sns",
-            Alerter::Sqs(_) => "sqs",
-            Alerter::Exotel(_) => "exotel",
-            Alerter::SmsEagle(_) => "smseagle",
-            Alerter::Stomp(_) => "stomp",
-            Alerter::TencentSms(_) => "tencent_sms",
-            Alerter::Twilio(_) => "twilio",
-        }
-    }
-
     /// The `alert_info` stored in the writeback doc.
     pub fn info(&self) -> Value {
         match self {

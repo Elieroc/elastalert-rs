@@ -266,6 +266,11 @@ ElastAlert 2 has 44 alerters. **all 44 are ported** (`debug`, `email`, `slack`, 
 | `tencent_sms` | supported: TC3-HMAC-SHA256 signature written here (checked against the Tencent Cloud SDK), `tencent_sms_template_parm` as JSON Pointers, region, sign name |
 | custom Python alerters | **not possible** |
 
+An `alert:` entry may carry options of its own, as in ElastAlert 2: `alert: [{slack: {slack_webhook_url: ...}}, email]` lays the entry's
+options over the rule's for that alerter only (alert text and subject options included), so one rule can use the same alerter twice with
+different settings. `$other_key$` references are resolved against the merged options. Options that shape the query or the rule type are not
+re-read per alerter. An entry must be a name or a map with exactly one alert name whose value is a map; anything else is rejected at load.
+
 Each alerter has its own delivery state: if Slack is down and email works, only Slack is retried (see below).
 
 ## What is covered and what is not
@@ -318,7 +323,7 @@ Deliberate or unavoidable differences in behaviour:
 | Topic | ElastAlert 2 | elastalert-rs |
 | --- | --- | --- |
 | Documents fetched | whole `_source` for every hit | only the fields the rule type uses; the full document is fetched (`_mget`) for the few matches. Same alert text. Set `fetch_full_source: true` or `include:` to opt out |
-| Failed alerter | the whole alert is marked unsent and every alerter is resent | per-alerter status in `alerters_sent`; only failed alerters are retried (30 s doubling, max 1 h, until `alert_time_limit`) |
+| Failed alerter | the whole alert is marked unsent and every alerter is resent | per-alerter status in `alerters_sent` (`slack`, then `slack#2`, ... for the same alerter used twice); only failed alerters are retried (30 s doubling, max 1 h, until `alert_time_limit`) |
 | Writeback | one request per document | one `_bulk` per second (or 500 docs); client-side ids make retries idempotent |
 | Pending alerts | polled every `run_every`, one `delete_by_query` each | kept in memory, mirrored in ES, aggregation groups sent by a timer |
 | Paging | scroll, recursive, capped at 990 pages | point in time + `search_after`, iterative, no cap |
