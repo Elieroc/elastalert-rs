@@ -408,15 +408,17 @@ New options that ElastAlert 2 does not have: the `correlation` rule type (`corre
 
 ## Performance
 
-Measured on one machine (Elasticsearch 8.15 single node in Docker, same host for both programs), rule time taken from each
-daemon's own `time_taken` field in the status document. These are single measurements, not a benchmark suite; your data and hardware will differ.
+Measured on 2026-10-24 on one machine (24 threads, 30 GB; Elasticsearch 8.15.5 single node with a 2 GB heap in Docker, same host for both programs;
+elastalert-rs 1.2.0 release build, ElastAlert 2.31.0 from its wheel), rule time taken from each daemon's own `time_taken` field in the status document,
+peak memory from `getrusage`. elastalert-rs: three runs, ElastAlert 2: two runs; the figures are the median. These are not a benchmark suite; your data and hardware will differ.
+Reproduce with `bench/` (see `replica/build-log.md`).
 
 | Scenario | ElastAlert 2.31.0 | elastalert-rs |
 | --- | --- | --- |
-| Frequency rule over 400,000 documents (1.3 KB each), 3 days, 6 h `buffer_time` | 42.7 s, 397 MB max RSS | 4.2 s, 143 MB max RSS |
-| Same, matches | 549 | 549, every match body identical |
-| 500 rules loaded and validated | not measured | 0.02 s, 16 MB |
-| Daemon with 500 rules, 35 s after start | 94 MB, still running its first rules | 30 MB, every rule had run once |
+| Frequency rule over 400,000 documents (1.3 KB each), 3 days, 6 h `buffer_time` | 34.0 s, 389 MB max RSS | 3.0 s, 145 MB max RSS (142 to 160 MB over the three runs), about 11 times faster |
+| Same, hits / matches | 398,769 / 549 | 398,769 / 549, every match body identical |
+| 500 rules loaded and validated | not measured | 0.01 s, 16 MB |
+| Daemon with 500 rules, 35 s after start | 89 MB, every rule had run once | 38 MB, every rule had run once |
 
 Where the difference comes from: a compiled runtime without a GIL, field projection (only ts and key fields are read from Elasticsearch),
 bulk writeback, compact event windows. Not measured yet: bytes on the wire, CPU per million hits, latency with many aggregation groups.
