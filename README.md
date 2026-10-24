@@ -218,7 +218,7 @@ Options not listed anywhere are ignored, as in ElastAlert 2, so typos are not de
 
 ### Alerters
 
-ElastAlert 2 has 44 alerters. **36 are ported** (`debug`, `email`, `slack`, `post`, `command`, the sixteen chat webhooks, the nine on-call / incident alerters and the six SOC / ticketing alerters below); a rule naming any other alerter is rejected.
+ElastAlert 2 has 44 alerters. **all 44 are ported** (`debug`, `email`, `slack`, `post`, `command`, the sixteen chat webhooks, the nine on-call / incident alerters, the six SOC / ticketing alerters and the eight cloud / queue / SMS alerters below); a rule naming any other alerter is rejected.
 
 | Alerter | Status |
 | --- | --- |
@@ -258,7 +258,12 @@ ElastAlert 2 has 44 alerters. **36 are ported** (`debug`, `email`, `slack`, `pos
 | `servicenow` | supported: all options. The description holds only the last match, as upstream |
 | `gelf` | supported: `http` (the HTTP status is not checked, as upstream) and `tcp`, headers, CA file for HTTP, timeout. `gelf_ca_cert` with `tcp` is rejected (upstream's TLS path cannot work); another `gelf_type` is rejected at load. The `host` field is the machine's host name, without the DNS lookup of `getfqdn()` |
 | `indexer` | supported: `indexer_alert_config` with field lookup (match, then rule option, else the text itself), `name` / `value` lists, `filter`, nested keys; `indexer_connection` or an `indexer_config` YAML file (same keys as `config.yaml`) with `indexer_alerts_name` |
-| `sns`, `sqs`, `ses`, `stomp`, `twilio`, `exotel`, `smseagle`, `tencent_sms` | **not ported** |
+| `sns`, `sqs`, `ses` | supported: key pair in the rule (`<alerter>_aws_access_key_id` / `_secret_access_key`), `<alerter>_aws_profile` (keys from `~/.aws/credentials` or `~/.aws/config`; `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`), region options, and without any of these the boto3 chain: environment variables, EKS web identity (`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`), the default profile, ECS task role, EC2 instance role. Requests are signed with SigV4 written here (checked against botocore); `AWS_ENDPOINT_URL` / `AWS_ENDPOINT_URL_<SERVICE>` override the endpoint (LocalStack). SQS takes its region from the queue URL; SES uses the SES API, not SMTP, with `ses_email_from_field`, `ses_email_add_domain`, cc, bcc, reply-to. **Not**: profiles that assume a role, use SSO or `credential_process` (rejected with a message when the alert is sent) |
+| `stomp` | supported: `stomp_hostname`, `stomp_hostport`, `stomp_login`, `stomp_password`, `stomp_destination`; STOMP 1.0 to 1.2 over plain TCP written here (no TLS, as upstream) |
+| `twilio` | supported: SMS (`twilio_from_number`) and Copilot (`twilio_use_copilot`, `twilio_message_service_sid`); the message body is the rule name, as upstream |
+| `exotel` | supported. Upstream sends the SMS and then always reports failure (it compares the `Response` object to 200), so the alert is retried and the SMS repeated; here the alert succeeds when Exotel answers HTTP 200 |
+| `smseagle` | supported: `sms`, `ring`, `tts`, `tts_adv` message types, recipients (`smseagle_to`, `_contacts`, `_groups`), duration, voice id |
+| `tencent_sms` | supported: TC3-HMAC-SHA256 signature written here (checked against the Tencent Cloud SDK), `tencent_sms_template_parm` as JSON Pointers, region, sign name |
 | custom Python alerters | **not possible** |
 
 Each alerter has its own delivery state: if Slack is down and email works, only Slack is retried (see below).
@@ -281,9 +286,8 @@ Each alerter has its own delivery state: if Slack is down and email works, only 
 
 **Not covered** (summary; details in the tables above)
 
-- 8 of 44 alerters: SNS, SQS, SES, STOMP, Twilio, Exotel, SMSEagle, Tencent SMS.
 - Python match enhancements (Rust modules instead, see [docs/enhancements.md](docs/enhancements.md)) and custom `jinja_filters`.
-- `notify_alert` (error notifications through alerters), statsd, AWS SigV4 signing, `replace_dots_in_field_names`.
+- `notify_alert` (error notifications through alerters), statsd, AWS SigV4 signing of Elasticsearch requests (the SNS / SQS / SES alerters sign their own), `replace_dots_in_field_names`.
 - Per-rule Elasticsearch connections, Python plugins of any kind (rule types, alerters, loaders, enhancements, filters), Python `logging:` config.
 - Helm chart.
 - Elasticsearch older than 7 and any cluster not listed above.
@@ -400,7 +404,7 @@ src/types.rs       rule types and EventWindow
 src/rule.rs        rule loading, imports, validation, defaults
 src/config.rs      config.yaml, environment overrides
 src/es.rs          Elasticsearch / OpenSearch REST client (PIT, scroll, bulk, mget, request tracing)
-src/alerters/     one module per alerter (email, slack, post, command), shared HTTP client in http.rs
+src/alerters/     one module per alerter, shared HTTP client (http.rs), AWS credentials + SigV4 (aws.rs), HMAC / base64 (crypto.rs)
 src/alert.rs       alert text (match body, subject, summary tables, jinja)
 src/discover.rs    Kibana / OpenSearch Discover links (Rison, URL formatters, Kibana short URLs)
 src/querylang.rs   EQL / ES|QL request and response conversion

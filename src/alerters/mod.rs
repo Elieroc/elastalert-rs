@@ -2,6 +2,7 @@
 
 mod alerta;
 mod alertmanager;
+mod aws;
 mod chatwork;
 mod command;
 mod crypto;
@@ -9,6 +10,7 @@ mod datadog;
 mod dingtalk;
 mod discord;
 mod email;
+mod exotel;
 mod flashduty;
 mod gelf;
 mod gitter;
@@ -30,8 +32,15 @@ mod post2;
 mod power_automate;
 mod rocketchat;
 mod servicenow;
+mod ses;
 mod slack;
+mod smseagle;
+mod sns;
+mod sqs;
+mod stomp;
 mod telegram;
+mod tencent_sms;
+mod twilio;
 mod victorops;
 mod webex;
 mod workwechat;
@@ -87,6 +96,14 @@ pub enum Alerter {
     Hive(hivealerter::Hive),
     Indexer(indexer::Indexer),
     Jira(jira::Jira),
+    Ses(ses::Ses),
+    Sns(sns::Sns),
+    Sqs(sqs::Sqs),
+    Exotel(exotel::Exotel),
+    SmsEagle(smseagle::SmsEagle),
+    Stomp(stomp::Stomp),
+    TencentSms(tencent_sms::TencentSms),
+    Twilio(twilio::Twilio),
 }
 
 /// Read-only view the alerters need to produce text.
@@ -151,6 +168,14 @@ impl Alerter {
             "hivealerter" => Alerter::Hive(hivealerter::Hive::new(rule)?),
             "indexer" => Alerter::Indexer(indexer::Indexer::new(rule)?),
             "jira" => Alerter::Jira(jira::Jira::new(rule)?),
+            "ses" => Alerter::Ses(ses::Ses::new(rule)?),
+            "sns" => Alerter::Sns(sns::Sns::new(rule)?),
+            "sqs" => Alerter::Sqs(sqs::Sqs::new(rule)?),
+            "exotel" => Alerter::Exotel(exotel::Exotel::new(rule)?),
+            "smseagle" => Alerter::SmsEagle(smseagle::SmsEagle::new(rule)?),
+            "stomp" => Alerter::Stomp(stomp::Stomp::new(rule)?),
+            "tencent_sms" => Alerter::TencentSms(tencent_sms::TencentSms::new(rule)?),
+            "twilio" => Alerter::Twilio(twilio::Twilio::new(rule)?),
             other => bail!("alerter '{other}' is not supported yet"),
         })
     }
@@ -193,6 +218,14 @@ impl Alerter {
             Alerter::Hive(_) => "hivealerter",
             Alerter::Indexer(_) => "indexer",
             Alerter::Jira(_) => "jira",
+            Alerter::Ses(_) => "ses",
+            Alerter::Sns(_) => "sns",
+            Alerter::Sqs(_) => "sqs",
+            Alerter::Exotel(_) => "exotel",
+            Alerter::SmsEagle(_) => "smseagle",
+            Alerter::Stomp(_) => "stomp",
+            Alerter::TencentSms(_) => "tencent_sms",
+            Alerter::Twilio(_) => "twilio",
         }
     }
 
@@ -235,6 +268,14 @@ impl Alerter {
             Alerter::Hive(a) => a.info(),
             Alerter::Indexer(a) => a.info(),
             Alerter::Jira(a) => a.info(),
+            Alerter::Ses(a) => a.info(),
+            Alerter::Sns(a) => a.info(),
+            Alerter::Sqs(a) => a.info(),
+            Alerter::Exotel(a) => a.info(),
+            Alerter::SmsEagle(a) => a.info(),
+            Alerter::Stomp(a) => a.info(),
+            Alerter::TencentSms(a) => a.info(),
+            Alerter::Twilio(a) => a.info(),
         }
     }
 
@@ -286,6 +327,14 @@ impl Alerter {
             Alerter::Hive(a) => a.alert(v, matches).await,
             Alerter::Indexer(a) => a.alert(v, matches).await,
             Alerter::Jira(a) => a.alert(v, matches).await,
+            Alerter::Ses(a) => a.alert(v, matches).await,
+            Alerter::Sns(a) => a.alert(v, matches).await,
+            Alerter::Sqs(a) => a.alert(v, matches).await,
+            Alerter::Exotel(a) => a.alert(v, matches).await,
+            Alerter::SmsEagle(a) => a.alert(v, matches).await,
+            Alerter::Stomp(a) => a.alert(v, matches).await,
+            Alerter::TencentSms(a) => a.alert(v, matches).await,
+            Alerter::Twilio(a) => a.alert(v, matches).await,
         }
     }
 }

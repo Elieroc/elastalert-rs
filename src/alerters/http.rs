@@ -12,6 +12,15 @@ enum Body<'a> {
     Form(String),
 }
 
+/// `application/x-www-form-urlencoded` text for `fields`.
+pub fn form_body(fields: &[(&str, String)]) -> String {
+    let mut enc = url::form_urlencoded::Serializer::new(String::new());
+    for (k, v) in fields {
+        enc.append_pair(k, v);
+    }
+    enc.finish()
+}
+
 pub struct Http {
     client: reqwest::Client,
     basic_auth: Option<(String, String)>,
@@ -87,6 +96,18 @@ impl Http {
         req.send().await.map_err(|e| anyhow::anyhow!("Error {what}: {e}"))
     }
 
+    /// Sends `body` as it is (the caller signed these exact bytes); the response is returned whatever its status.
+    pub async fn request_text(&self, method: reqwest::Method, what: &str, url: &str, headers: &[(String, String)], body: String) -> Result<reqwest::Response> {
+        let mut req = self.client.request(method, url).body(body);
+        if let Some((u, p)) = &self.basic_auth {
+            req = req.basic_auth(u, Some(p));
+        }
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+        req.send().await.map_err(|e| anyhow::anyhow!("Error {what}: {e}"))
+    }
+
     /// Sends HTTP basic authentication with every request.
     pub fn with_basic_auth(mut self, login: String, password: String) -> Http {
         self.basic_auth = Some((login, password));
@@ -101,14 +122,7 @@ impl Http {
 
     /// POSTs `fields` as `application/x-www-form-urlencoded` with the error details of `post_json_details`.
     pub async fn post_form_details(&self, what: &str, url: &str, headers: &[(String, String)], fields: &[(&str, String)]) -> Result<reqwest::Response> {
-        let encoded = {
-            let mut enc = url::form_urlencoded::Serializer::new(String::new());
-            for (k, v) in fields {
-                enc.append_pair(k, v);
-            }
-            enc.finish()
-        };
-        self.send(what, url, headers, Body::Form(encoded), true).await
+        self.send(what, url, headers, Body::Form(form_body(fields)), true).await
     }
 
     /// Like `post_json`, and the error carries the response text ("... Details: ..."), as upstream's Discord and Telegram do.

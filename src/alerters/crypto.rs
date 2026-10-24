@@ -1,4 +1,4 @@
-//! Small primitives for request signing (DingTalk now; AWS SigV4 and Tencent TC3 later, which will also need hex), on top of `sha2`.
+//! Small primitives for request signing (DingTalk, AWS SigV4, Tencent TC3), on top of `sha2`.
 
 use sha2::{Digest, Sha256};
 
@@ -36,13 +36,17 @@ pub fn base64(data: &[u8]) -> String {
     out
 }
 
+pub fn hex(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn sha256_hex(data: &[u8]) -> String {
+    hex(Sha256::digest(data).as_slice())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn hex(data: &[u8]) -> String {
-        data.iter().map(|b| format!("{b:02x}")).collect()
-    }
 
     #[test]
     fn hmac_rfc4231_vectors() {
