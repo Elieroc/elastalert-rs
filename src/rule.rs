@@ -39,25 +39,23 @@ pub enum TsType {
     UnixMs,
 }
 
-/// One step of a `correlation` rule: the events it waits for, as its own search.
+/// One leaf of a `correlation` rule: the events it stands for, as its own search.
 #[derive(Clone, Debug)]
-pub struct Step {
+pub struct Leaf {
     pub name: String,
     pub filter: Vec<Value>,
-    /// Overrides the rule's `index` for this step.
+    /// Overrides the rule's `index` for this leaf.
     pub index: Option<String>,
-    /// Field holding the pivot value in this step's documents, when it differs from the rule's `query_key`.
+    /// Field holding the pivot value in this leaf's documents, when it differs from the rule's `query_key`.
     pub query_key: Option<String>,
     pub num_events: u64,
-    /// The step must NOT happen within `timeframe` of the first step (last step only).
-    pub absent: bool,
 }
 
-/// `correlation_steps` + `ordered` of a `correlation` rule.
+/// `correlation_leaves` + `correlation_query` of a `correlation` rule.
 #[derive(Clone, Debug)]
 pub struct CorrelationSpec {
-    pub steps: Vec<Step>,
-    pub ordered: bool,
+    pub leaves: Vec<Leaf>,
+    pub query: crate::correlation::Query,
 }
 
 /// When an aggregated alert is sent after its first match.
@@ -135,7 +133,7 @@ pub struct Rule {
     pub run_enhancements_first: bool,
     /// Set when a `filter` entry is an `eql` or `esql` query.
     pub query_lang: Option<QueryLang>,
-    /// `correlation` rules: the steps to correlate on `query_key`.
+    /// `correlation` rules: the leaves to correlate on `query_key`, and how.
     pub correlation: Option<CorrelationSpec>,
     /// The merged rule document; alert text and alerters read arbitrary keys from it.
     pub raw: Map<String, Value>,
@@ -476,7 +474,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
             }
         }
         Kind::SpikeAggregation => need(&["timeframe", "spike_height", "spike_type", "metric_agg_key", "metric_agg_type"])?,
-        Kind::Correlation => need(&["correlation_steps", "query_key", "timeframe"])?,
+        Kind::Correlation => need(&["correlation_leaves", "correlation_query", "query_key", "timeframe"])?,
         Kind::PercentageMatch => {
             need(&["match_bucket_filter"])?;
             if !raw.contains_key("max_percentage") && !raw.contains_key("min_percentage") {
@@ -662,72 +660,51 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
     })
 }
 
-/// `correlation_steps` and `ordered`. Every step is its own search, so a step can only use Query DSL filters.
+/// `correlation_leaves` and `correlation_query`. Every leaf is its own search, so a leaf can only use Query DSL filters.
 fn correlation_options(raw: &Map<String, Value>, query_key: Option<&str>, compound: bool) -> Result<CorrelationSpec> {
-    let list = raw["correlation_steps"].as_array().context("correlation_steps must be a list")?;
-    if list.len() < 2 {
-        bail!("correlation_steps needs at least two steps");
-    }
-    let ordered = match raw.get("ordered") {
-        None | Some(Value::Null) => true,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => bail!("ordered must be true or false"),
-    };
-    let mut steps: Vec<Step> = Vec::new();
-    for (i, item) in list.iter().enumerate() {
-        let m = item.as_object().with_context(|| format!("correlation_steps[{i}] must be a map"))?;
-        if let Some(k) = m.keys().find(|k| !["name", "filter", "index", "query_key", "num_events", "absent"].contains(&k.as_str())) {
-            bail!("correlation_steps[{i}]: option {k} is not supported (name, filter, index, query_key, num_events, absent)");
+    let map = raw["correlation_leaves"].as_object().context("correlation_leaves must be a map of leaf name to leaf")?;
+    let mut leaves: Vec<Leaf> = Vec::new();
+    for (name, item) in map {
+        if name.is_empty() || !name.chars().all(crate::correlation::is_name_char) {
+            bail!("correlation leaf {name:?}: a name may only contain letters, digits, '_' and '-'");
         }
-        let name = m.get("name").and_then(Value::as_str).with_context(|| format!("correlation_steps[{i}] needs a name"))?.to_string();
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            bail!("correlation_steps[{i}]: name {name:?} may only contain letters, digits, '_' and '-'");
+        if crate::correlation::KEYWORDS.contains(&name.to_ascii_uppercase().as_str()) {
+            bail!("correlation leaf {name:?}: AND, OR, THEN and NOT are keywords of correlation_query");
         }
-        if steps.iter().any(|s| s.name == name) {
-            bail!("correlation_steps: duplicate step name {name}");
+        let m = item.as_object().with_context(|| format!("correlation leaf {name} must be a map"))?;
+        if let Some(k) = m.keys().find(|k| !["filter", "index", "query_key", "num_events"].contains(&k.as_str())) {
+            bail!("correlation leaf {name}: option {k} is not supported (filter, index, query_key, num_events)");
         }
         let filter = match m.get("filter") {
             Some(Value::Array(a)) if !a.is_empty() => a.clone(),
-            _ => bail!("correlation step {name} needs a non-empty filter list"),
+            _ => bail!("correlation leaf {name} needs a non-empty filter list"),
         };
         if querylang::detect(&filter)?.is_some() {
-            bail!("correlation step {name}: eql and esql filters are not supported in correlation rules");
+            bail!("correlation leaf {name}: eql and esql filters are not supported in correlation rules");
         }
         let index = match m.get("index") {
             None | Some(Value::Null) => None,
             Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-            Some(_) => bail!("correlation step {name}: index must be a string"),
+            Some(_) => bail!("correlation leaf {name}: index must be a string"),
         };
-        let step_key = match m.get("query_key") {
+        let leaf_key = match m.get("query_key") {
             None | Some(Value::Null) => None,
             Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-            Some(_) => bail!("correlation step {name}: query_key must be a single field name"),
+            Some(_) => bail!("correlation leaf {name}: query_key must be a single field name"),
         };
-        if step_key.is_some() && (query_key.is_none() || compound) {
-            bail!("correlation step {name}: a step query_key needs a single-field query_key on the rule");
+        if leaf_key.is_some() && (query_key.is_none() || compound) {
+            bail!("correlation leaf {name}: a leaf query_key needs a single-field query_key on the rule");
         }
-        let absent = match m.get("absent") {
-            None | Some(Value::Null) => false,
-            Some(Value::Bool(b)) => *b,
-            Some(_) => bail!("correlation step {name}: absent must be true or false"),
-        };
         let num_events = match m.get("num_events") {
             None | Some(Value::Null) => 1,
-            Some(v) => v.as_u64().filter(|n| *n > 0).with_context(|| format!("correlation step {name}: num_events must be a positive integer"))?,
+            Some(v) => v.as_u64().filter(|n| *n > 0).with_context(|| format!("correlation leaf {name}: num_events must be a positive integer"))?,
         };
-        if absent && m.contains_key("num_events") {
-            bail!("correlation step {name}: num_events cannot be combined with absent");
-        }
-        steps.push(Step { name, filter, index, query_key: step_key, num_events, absent });
+        leaves.push(Leaf { name: name.clone(), filter, index, query_key: leaf_key, num_events });
     }
-    let last = steps.len() - 1;
-    if let Some(s) = steps[..last].iter().find(|s| s.absent) {
-        bail!("correlation step {}: only the last step can be absent", s.name);
-    }
-    if steps[last].absent && !ordered {
-        bail!("an absent step needs ordered: true");
-    }
-    Ok(CorrelationSpec { steps, ordered })
+    let src = raw["correlation_query"].as_str().context("correlation_query must be a string")?;
+    let names: Vec<String> = leaves.iter().map(|l| l.name.clone()).collect();
+    let query = crate::correlation::parse(src, &names).with_context(|| format!("correlation_query {src:?}"))?;
+    Ok(CorrelationSpec { leaves, query })
 }
 
 const METRIC_TYPES: [&str; 7] = ["min", "max", "avg", "sum", "cardinality", "value_count", "percentiles"];
@@ -853,44 +830,47 @@ mod tests {
         load(&file, &conf)
     }
 
-    const CORR_OK: &str = "query_key: host.name\ntimeframe: {hours: 1}\ncorrelation_steps:\n- {name: a, filter: [{term: {k: a}}]}\n- {name: b, filter: [{term: {k: b}}], index: other-*, query_key: host.id}\n";
+    const CORR_OK: &str = "query_key: host.name\ntimeframe: {hours: 1}\ncorrelation_query: a then (b OR c)\ncorrelation_leaves:\n  a: {filter: [{term: {k: a}}], num_events: 3}\n  b: {filter: [{term: {k: b}}], index: other-*, query_key: host.id}\n  c: {filter: [{term: {k: c}}]}\n";
 
     #[test]
     fn correlation_rule_loads() {
         let r = load_correlation("ok", CORR_OK).unwrap();
         let c = r.correlation.unwrap();
-        assert!(c.ordered);
-        assert_eq!(c.steps.len(), 2);
-        assert_eq!(c.steps[1].index.as_deref(), Some("other-*"));
-        assert_eq!(c.steps[1].query_key.as_deref(), Some("host.id"));
-        assert_eq!((c.steps[0].num_events, c.steps[0].absent), (1, false));
+        assert_eq!(c.leaves.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(c.leaves[1].index.as_deref(), Some("other-*"));
+        assert_eq!(c.leaves[1].query_key.as_deref(), Some("host.id"));
+        assert_eq!((c.leaves[0].num_events, c.leaves[1].num_events), (3, 1));
+        assert_eq!(c.query.text, "a THEN (b OR c)");
         assert!(r.include.contains(&"*".to_string()), "whole documents are fetched");
     }
 
     #[test]
     fn correlation_rule_rejects_bad_options() {
-        let steps = "correlation_steps:\n- {name: a, filter: [{term: {k: a}}]}\n- {name: b, filter: [{term: {k: b}}]}\n";
-        let head = "query_key: host.name\ntimeframe: {hours: 1}\n";
-        let bad = |name: &str, body: String| {
-            let r = load_correlation(name, &body);
-            assert!(r.is_err(), "{name} should be rejected");
+        let leaves = "correlation_leaves:\n  a: {filter: [{term: {k: a}}]}\n  b: {filter: [{term: {k: b}}]}\n";
+        let head = "query_key: host.name\ntimeframe: {hours: 1}\ncorrelation_query: a AND b\n";
+        let bad = |name: &str, body: String, msg: &str| {
+            let err = format!("{:#}", load_correlation(name, &body).map(|_| ()).expect_err(name));
+            assert!(err.contains(msg), "{name}: {err}");
         };
-        bad("nosteps", head.to_string());
-        bad("notimeframe", format!("query_key: h\n{steps}"));
-        bad("nokey", format!("timeframe: {{hours: 1}}\n{steps}"));
-        bad("onestep", format!("{head}correlation_steps:\n- {{name: a, filter: [{{term: {{k: a}}}}]}}\n"));
-        bad("dupname", format!("{head}correlation_steps:\n- {{name: a, filter: [{{term: {{k: a}}}}]}}\n- {{name: a, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("dotname", format!("{head}correlation_steps:\n- {{name: a.b, filter: [{{term: {{k: a}}}}]}}\n- {{name: b, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("nofilter", format!("{head}correlation_steps:\n- {{name: a}}\n- {{name: b, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("eql", format!("{head}correlation_steps:\n- {{name: a, filter: [{{eql: 'any where true'}}]}}\n- {{name: b, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("unknownopt", format!("{head}correlation_steps:\n- {{name: a, filter: [{{term: {{k: a}}}}], within: 5}}\n- {{name: b, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("absentfirst", format!("{head}correlation_steps:\n- {{name: a, absent: true, filter: [{{term: {{k: a}}}}]}}\n- {{name: b, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("absentunordered", format!("{head}ordered: false\ncorrelation_steps:\n- {{name: a, filter: [{{term: {{k: a}}}}]}}\n- {{name: b, absent: true, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("absentcount", format!("{head}correlation_steps:\n- {{name: a, filter: [{{term: {{k: a}}}}]}}\n- {{name: b, absent: true, num_events: 2, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("compoundstepkey", format!("query_key: [a, b]\ntimeframe: {{hours: 1}}\ncorrelation_steps:\n- {{name: a, query_key: x, filter: [{{term: {{k: a}}}}]}}\n- {{name: b, filter: [{{term: {{k: b}}}}]}}\n"));
-        bad("countquery", format!("{head}use_count_query: true\ndoc_type: x\n{steps}"));
-        bad("rulefilter", format!("{head}filter:\n- eql: 'any where true'\n{steps}"));
-        assert!(load_correlation("absentok", &format!("{head}correlation_steps:\n- {{name: a, filter: [{{term: {{k: a}}}}]}}\n- {{name: b, absent: true, filter: [{{term: {{k: b}}}}]}}\n")).is_ok());
+        bad("noleaves", head.to_string(), "correlation_leaves");
+        bad("noquery", format!("query_key: h\ntimeframe: {{hours: 1}}\n{leaves}"), "correlation_query");
+        bad("notimeframe", format!("query_key: h\ncorrelation_query: a AND b\n{leaves}"), "timeframe");
+        bad("nokey", format!("timeframe: {{hours: 1}}\ncorrelation_query: a AND b\n{leaves}"), "query_key");
+        bad("steps", format!("query_key: h\ntimeframe: {{hours: 1}}\ncorrelation_steps:\n- {{name: a, filter: [{{term: {{k: a}}}}]}}\n"), "correlation_leaves");
+        bad("list", format!("{head}correlation_leaves:\n- {{name: a, filter: [{{term: {{k: a}}}}]}}\n"), "must be a map");
+        bad("dotname", format!("{head}correlation_leaves:\n  a.b: {{filter: [{{term: {{k: a}}}}]}}\n"), "may only contain");
+        bad("keyword", format!("{head}correlation_leaves:\n  Then: {{filter: [{{term: {{k: a}}}}]}}\n"), "keywords");
+        bad("nofilter", format!("{head}correlation_leaves:\n  a: {{}}\n  b: {{filter: [{{term: {{k: b}}}}]}}\n"), "non-empty filter");
+        bad("eql", format!("{head}correlation_leaves:\n  a: {{filter: [{{eql: 'any where true'}}]}}\n  b: {{filter: [{{term: {{k: b}}}}]}}\n"), "eql and esql");
+        bad("absent", format!("{head}correlation_leaves:\n  a: {{filter: [{{term: {{k: a}}}}]}}\n  b: {{absent: true, filter: [{{term: {{k: b}}}}]}}\n"), "option absent is not supported");
+        bad("zero", format!("{head}correlation_leaves:\n  a: {{num_events: 0, filter: [{{term: {{k: a}}}}]}}\n  b: {{filter: [{{term: {{k: b}}}}]}}\n"), "positive integer");
+        bad("compoundleafkey", format!("query_key: [a, b]\ntimeframe: {{hours: 1}}\ncorrelation_query: a AND b\ncorrelation_leaves:\n  a: {{query_key: x, filter: [{{term: {{k: a}}}}]}}\n  b: {{filter: [{{term: {{k: b}}}}]}}\n"), "single-field query_key");
+        bad("unused", format!("query_key: h\ntimeframe: {{hours: 1}}\ncorrelation_query: a THEN a\n{leaves}"), "leaf b is not used");
+        bad("unknown", format!("query_key: h\ntimeframe: {{hours: 1}}\ncorrelation_query: a AND b AND c\n{leaves}"), "unknown leaf c");
+        bad("mixed", format!("query_key: h\ntimeframe: {{hours: 1}}\ncorrelation_query: a AND b THEN a\n{leaves}"), "without parentheses");
+        bad("countquery", format!("{head}use_count_query: true\ndoc_type: x\n{leaves}"), "");
+        bad("rulefilter", format!("{head}filter:\n- eql: 'any where true'\n{leaves}"), "eql");
+        assert!(load_correlation("notok", &format!("query_key: h\ntimeframe: {{hours: 1}}\ncorrelation_query: a then not b\n{leaves}")).is_ok());
     }
 
     fn load_alert_list(name: &str, alert_yaml: &str, extra: &str) -> Result<Rule> {

@@ -1,6 +1,7 @@
 mod alert;
 mod alerters;
 mod config;
+mod correlation;
 mod discover;
 mod engine;
 mod enhancements;

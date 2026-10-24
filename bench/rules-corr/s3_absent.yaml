@@ -1,0 +1,19 @@
+name: s3 absent
+type: correlation
+timeframe: {minutes: 10}
+index: bench-fat
+query_key: user.name
+realert: {minutes: 0}
+alert_text_type: alert_text_only
+alert_text: "M {0} {1}"
+alert_text_args: [user.name, "@timestamp"]
+alert: debug
+correlation_leaves:
+  unauth:
+    filter:
+    - term: {http.response.status_code: 401}
+    - term: {host.name.keyword: web-1}
+  db:
+    filter:
+    - term: {host.name.keyword: db-1}
+correlation_query: unauth THEN NOT db

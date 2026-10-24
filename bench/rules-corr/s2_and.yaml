@@ -1,0 +1,21 @@
+name: s2 and
+type: correlation
+timeframe: {minutes: 10}
+index: bench-fat
+query_key: user.name
+realert: {minutes: 0}
+alert_text_type: alert_text_only
+alert_text: "M {0} {1}"
+alert_text_args: [user.name, "@timestamp"]
+alert: debug
+correlation_leaves:
+  fail:
+    num_events: 3
+    filter:
+    - term: {event.outcome.keyword: failure}
+  denied:
+    num_events: 2
+    filter:
+    - term: {http.response.status_code: 403}
+    - term: {host.name.keyword: db-1}
+correlation_query: fail AND denied

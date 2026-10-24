@@ -545,8 +545,9 @@ How do I replace an EQL sequence query?
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 EQL ``sequence`` queries make the rule run fail in ElastAlert 3 (ElastAlert 2 silently returns no events). Use the
-:ref:`correlation <correlation>` rule type: each step is a search of its own, on the same ``query_key`` within
-``timeframe``. It also works on OpenSearch and can alert on a step that did not happen.
+:ref:`correlation <correlation>` rule type: each leaf is a search of its own, on the same ``query_key`` within
+``timeframe``, and ``correlation_query`` combines them (``a THEN b THEN c`` for a sequence). It also works on
+OpenSearch and can alert on something that did not happen (``a THEN NOT b``).
 
 How can I mute a rule outside office hours?
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

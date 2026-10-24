@@ -1,5 +1,6 @@
 //! Rule types: they receive query results and emit matches. State is per rule (never shared).
 
+use crate::correlation::{Progress, Query};
 use crate::es::Es;
 use crate::field::{self, py_str};
 use crate::rule::{Kind, Rule, TsType};
@@ -236,13 +237,13 @@ impl RuleType {
             RuleType::Compare(c) => c.add_data(rule, events, matches),
             RuleType::NewTerm(n) => n.add_data(rule, events, matches),
             RuleType::Cardinality(c) => c.add_data(rule, events, matches),
-            // Correlation events arrive tagged with their step, through `add_correlation`.
+            // Correlation events arrive tagged with their leaves, through `add_correlation`.
             RuleType::MetricAgg(_) | RuleType::Percentage(_) | RuleType::Correlation(_) => {}
         }
     }
 
-    /// Events of every step of a `correlation` rule for one query range, oldest first (equal times in step order).
-    pub fn add_correlation(&mut self, rule: &Rule, events: Vec<(usize, Event)>, matches: &mut Vec<Doc>) {
+    /// Events of every leaf of a `correlation` rule for one query range, oldest first, each with the leaves it matched.
+    pub fn add_correlation(&mut self, rule: &Rule, events: Vec<(Vec<usize>, Event)>, matches: &mut Vec<Doc>) {
         if let RuleType::Correlation(c) = self {
             c.add_events(rule, events, matches);
         }
@@ -1202,29 +1203,32 @@ impl Cardinality {
     }
 }
 
-/// Progress of one pivot value through the steps of a `correlation` rule.
+/// Progress of one pivot value through the `correlation_query` of a `correlation` rule.
 struct Chain {
     /// Time of the first event; the window `timeframe` is measured from here.
     first_ts: Ts,
-    /// Ordered rules: the step the chain waits for.
-    next: usize,
-    steps: Vec<StepRec>,
+    positive: Progress,
+    negated: Vec<Progress>,
+    /// With a `NOT` in the query: the event that completed the positive part, waiting for the end of the window.
+    completed: Option<Event>,
+    leaves: Vec<LeafRec>,
 }
 
 #[derive(Clone, Default)]
-struct StepRec {
+struct LeafRec {
     count: u64,
     first: Ts,
     last: Ts,
-    /// The newest event of the step.
+    /// The newest event of the leaf.
     doc: Option<Doc>,
 }
 
-/// `correlation`: the steps happen on the same `query_key` value within `timeframe` of the first one, optionally in order,
-/// with an optional last step that must not happen. One match per completed (or expired, for an absent step) chain.
+/// `correlation`: the leaves happen on the same `query_key` value within `timeframe` of the first one, as the
+/// `correlation_query` combines them. One match per completed chain; with a `NOT`, at the end of the window.
 pub struct Correlation {
-    steps: Vec<(String, u64, bool)>,
-    ordered: bool,
+    names: Vec<String>,
+    need: Vec<u64>,
+    query: Query,
     chains: FxHashMap<String, Chain>,
     /// Matches completing at or before this time were alerted by a previous run; replaying them only rebuilds state.
     suppress_until: Option<Ts>,
@@ -1232,113 +1236,114 @@ pub struct Correlation {
 
 impl Correlation {
     fn new(rule: &Rule) -> Self {
-        let spec = rule.correlation.as_ref().expect("correlation rules always have steps");
+        let spec = rule.correlation.as_ref().expect("correlation rules always have leaves");
         Correlation {
-            steps: spec.steps.iter().map(|s| (s.name.clone(), s.num_events, s.absent)).collect(),
-            ordered: spec.ordered,
+            names: spec.leaves.iter().map(|l| l.name.clone()).collect(),
+            need: spec.leaves.iter().map(|l| l.num_events).collect(),
+            query: spec.query.clone(),
             chains: FxHashMap::default(),
             suppress_until: None,
         }
     }
 
-    fn absent_last(&self) -> bool {
-        self.steps.last().is_some_and(|s| s.2)
-    }
-
-    /// Steps that must be seen for the chain to complete (all but a trailing absent one).
-    fn required(&self) -> usize {
-        self.steps.len() - usize::from(self.absent_last())
-    }
-
-    fn add_events(&mut self, rule: &Rule, events: Vec<(usize, Event)>, matches: &mut Vec<Doc>) {
-        for (step, ev) in events {
-            self.add_event(rule, step, ev, matches);
+    fn add_events(&mut self, rule: &Rule, events: Vec<(Vec<usize>, Event)>, matches: &mut Vec<Doc>) {
+        for (tags, ev) in events {
+            self.add_event(rule, &tags, ev, matches);
         }
     }
 
-    fn add_event(&mut self, rule: &Rule, step: usize, ev: Event, matches: &mut Vec<Doc>) {
+    fn add_event(&mut self, rule: &Rule, tags: &[usize], ev: Event, matches: &mut Vec<Doc>) {
         let key = group_key(rule, &ev.doc);
         if self.chains.get(&key).is_some_and(|c| ev.ts - c.first_ts > tf(rule)) {
             let chain = self.chains.remove(&key).expect("checked above");
             self.expired(rule, &key, chain, matches);
         }
-        if self.steps[step].2 {
-            // The forbidden event happened inside the window.
+        let q = &self.query;
+        let fresh = !self.chains.contains_key(&key);
+        let chain = self.chains.entry(key.clone()).or_insert_with(|| Chain {
+            first_ts: ev.ts,
+            positive: Progress::new(&q.positive),
+            negated: q.negated.iter().map(Progress::new).collect(),
+            completed: None,
+            leaves: vec![LeafRec::default(); self.names.len()],
+        });
+        let was_done = chain.positive.done;
+        let mut took = vec![false; self.names.len()];
+        if chain.positive.feed(&q.positive, tags, &self.need, &mut took) {
+            for (rec, _) in chain.leaves.iter_mut().zip(&took).filter(|(_, t)| **t) {
+                if rec.count == 0 {
+                    rec.first = ev.ts;
+                }
+                rec.count += 1;
+                rec.last = ev.ts;
+                rec.doc = Some(ev.doc.clone());
+            }
+        } else if fresh {
+            // Only an event of the positive part starts a chain.
             self.chains.remove(&key);
             return;
         }
-        let (n, required, absent_last) = (self.steps.len(), self.required(), self.absent_last());
-        if !self.chains.contains_key(&key) {
-            if self.ordered && step != 0 {
+        // `THEN NOT x`: x counts only after the positive part, and not with the event that completed it.
+        if !q.after || was_done {
+            let mut violated = false;
+            for (p, x) in chain.negated.iter_mut().zip(&q.negated) {
+                p.feed(x, tags, &self.need, &mut took);
+                violated |= p.done;
+            }
+            if violated {
+                self.chains.remove(&key);
                 return;
             }
-            self.chains.insert(key.clone(), Chain { first_ts: ev.ts, next: 0, steps: vec![StepRec::default(); n] });
         }
-        let chain = self.chains.get_mut(&key).expect("inserted above");
-        if self.ordered && step != chain.next {
-            return;
-        }
-        let rec = &mut chain.steps[step];
-        if rec.count == 0 {
-            rec.first = ev.ts;
-        }
-        rec.count += 1;
-        rec.last = ev.ts;
-        rec.doc = Some(ev.doc.clone());
-        if self.ordered && rec.count >= self.steps[step].1 {
-            chain.next += 1;
-        }
-        let done = if self.ordered { chain.next >= required } else { (0..required).all(|i| chain.steps[i].count >= self.steps[i].1) };
-        if done && !absent_last {
-            let chain = self.chains.remove(&key).expect("present");
-            self.emit(rule, &key, &chain, Some(ev), None, matches);
-        }
-    }
-
-    /// A chain whose window ended: with an absent last step and everything before it seen, that is the match.
-    fn expired(&mut self, rule: &Rule, key: &str, chain: Chain, matches: &mut Vec<Doc>) {
-        if self.absent_last() && chain.next >= self.required() {
-            let absent = self.steps.last().map(|s| s.0.clone());
-            self.emit(rule, key, &chain, None, absent, matches);
-        }
-    }
-
-    fn emit(&self, rule: &Rule, key: &str, chain: &Chain, trigger: Option<Event>, absent: Option<String>, matches: &mut Vec<Doc>) {
-        let (completed, event) = match trigger {
-            Some(ev) => (ev.ts, ev),
-            None => {
-                // The deadline passed without the absent step: the match is the event that started the chain.
-                let first = &chain.steps[0];
-                (chain.first_ts + tf(rule), Event { ts: first.first, doc: first.doc.clone().unwrap_or_default() })
+        if chain.positive.done && !was_done {
+            if q.negated.is_empty() {
+                let chain = self.chains.remove(&key).expect("present");
+                self.emit(rule, &key, &chain, ev, None, matches);
+            } else {
+                chain.completed = Some(ev);
             }
-        };
+        }
+    }
+
+    /// A chain whose window ended: with a `NOT` in the query and the positive part complete, that is the match.
+    fn expired(&mut self, rule: &Rule, key: &str, mut chain: Chain, matches: &mut Vec<Doc>) {
+        if let Some(ev) = chain.completed.take() {
+            self.emit(rule, key, &chain, ev, Some(chain.first_ts + tf(rule)), matches);
+        }
+    }
+
+    /// `event` completed the positive part; `window_end` is set when the match is the end of the window (a `NOT` held).
+    fn emit(&self, rule: &Rule, key: &str, chain: &Chain, event: Event, window_end: Option<Ts>, matches: &mut Vec<Doc>) {
+        let completed = window_end.unwrap_or(event.ts);
         if self.suppress_until.is_some_and(|t| completed <= t) {
             return;
         }
-        let mut steps = Map::new();
-        for ((name, _, _), rec) in self.steps.iter().zip(&chain.steps) {
+        let mut leaves = Map::new();
+        for (name, rec) in self.names.iter().zip(&chain.leaves) {
             if rec.count == 0 {
+                leaves.insert(name.clone(), Value::Null);
                 continue;
             }
             let mut o = rec.doc.clone().unwrap_or_default();
             o.insert("count".into(), json!(rec.count));
             o.insert("first".into(), json!(to_iso(rec.first)));
             o.insert("last".into(), json!(to_iso(rec.last)));
-            steps.insert(name.clone(), Value::Object(o));
+            leaves.insert(name.clone(), Value::Object(o));
         }
         let info = json!({
             "key": key_value(key),
+            "query": self.query.text,
             "first": to_iso(chain.first_ts),
             "last": to_iso(completed),
-            "absent": absent,
-            "steps": steps,
+            "absent": if window_end.is_some() { json!(self.query.negated_text) } else { Value::Null },
+            "leaves": leaves,
         });
         let mut m = into_match(rule, event);
         m.insert("correlation".into(), info);
         matches.push(m);
     }
 
-    /// Drops chains whose window has ended; an absent last step turns the armed ones into matches.
+    /// Drops chains whose window has ended; with a `NOT` in the query, the complete ones become matches.
     fn garbage_collect(&mut self, rule: &Rule, ts: Ts, matches: &mut Vec<Doc>) {
         let mut due: Vec<(Ts, String)> = self.chains.iter().filter(|(_, c)| ts - c.first_ts > tf(rule)).map(|(k, c)| (c.first_ts, k.clone())).collect();
         due.sort();
@@ -1354,11 +1359,13 @@ impl Correlation {
         let when = |k: &str| info.get(k).and_then(Value::as_str).and_then(crate::time::parse_iso).map(|t| pretty(t, rule.use_local_time, ts_fmt));
         let (Some(first), Some(last)) = (when("first"), when("last")) else { return String::new() };
         let key = info.get("key").map_or_else(|| "None".into(), py_str);
-        let names: Vec<&str> = self.steps.iter().take(self.required()).map(|s| s.0.as_str()).collect();
-        let list = names.join(if self.ordered { " -> " } else { ", " });
-        match info.get("absent").and_then(Value::as_str) {
-            Some(absent) => format!("Correlated events for {key} ({list}) started at {first} and no {absent} event followed within {}\n\n", pretty_duration(tf(rule))),
-            None => format!("Correlated events for {key} ({list}) between {first} and {last}\n\n"),
+        let query = &self.query.text;
+        match info.get("absent").and_then(Value::as_array) {
+            Some(absent) => {
+                let absent: Vec<&str> = absent.iter().filter_map(Value::as_str).collect();
+                format!("Correlated events for {key} ({query}) started at {first} and no {} within {}\n\n", absent.join(" or "), pretty_duration(tf(rule)))
+            }
+            None => format!("Correlated events for {key} ({query}) between {first} and {last}\n\n"),
         }
     }
 }
@@ -1398,124 +1405,203 @@ mod tests {
 
     const MIN: Ts = 60_000_000;
 
-    fn corr(extra: &str) -> (Rule, RuleType) {
-        let steps = "correlation_steps:\n- {name: tool, filter: [{term: {k: tool}}]}\n- {name: outbound, filter: [{term: {k: net}}]}\n";
-        let rule = rule_from(&format!("type: correlation\nquery_key: host.name\ntimeframe: {{hours: 1}}\n{steps}{extra}"));
+    /// A correlation rule over leaves named in `leaves` (sorted, so leaf `i` is the i-th name), with `query`.
+    fn corr_rule(leaves: &[(&str, u64)], query: &str, hours: i64) -> (Rule, RuleType) {
+        let list: String = leaves.iter().map(|(n, k)| format!("  {n}: {{num_events: {k}, filter: [{{term: {{k: {n}}}}}]}}\n")).collect();
+        let rule = rule_from(&format!("type: correlation\nquery_key: host.name\ntimeframe: {{hours: {hours}}}\ncorrelation_query: '{query}'\ncorrelation_leaves:\n{list}"));
         let rt = RuleType::new(&rule).unwrap();
         (rule, rt)
     }
 
-    fn cev(step: usize, host: &str, minute: i64) -> (usize, Event) {
+    /// `outbound` is leaf 0, `tool` leaf 1.
+    fn corr() -> (Rule, RuleType) {
+        corr_rule(&[("outbound", 1), ("tool", 1)], "tool THEN outbound", 1)
+    }
+
+    fn cev(leaf: usize, host: &str, minute: i64) -> (usize, Event) {
         let ts = 1_700_000_000_000_000 + minute * MIN;
-        (step, Event { ts, doc: Doc::from_iter([("host".to_string(), json!({"name": host})), ("@timestamp".into(), json!(to_iso(ts))), ("who".into(), json!(format!("{host}-{step}-{minute}")))]) })
+        (leaf, Event { ts, doc: Doc::from_iter([("host".to_string(), json!({"name": host})), ("@timestamp".into(), json!(to_iso(ts))), ("who".into(), json!(format!("{host}-{leaf}-{minute}")))]) })
     }
 
     fn feed(rule: &Rule, rt: &mut RuleType, events: Vec<(usize, Event)>) -> Vec<Doc> {
         let mut out = Vec::new();
-        rt.add_correlation(rule, events, &mut out);
+        rt.add_correlation(rule, events.into_iter().map(|(leaf, ev)| (vec![leaf], ev)).collect(), &mut out);
         out
     }
 
+    const OUT: usize = 0;
+    const TOOL: usize = 1;
+
     #[test]
-    fn correlation_ordered_matches_once_per_chain() {
-        let (rule, mut rt) = corr("");
-        let m = feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 10)]);
+    fn correlation_then_matches_once_per_chain() {
+        let (rule, mut rt) = corr();
+        let m = feed(&rule, &mut rt, vec![cev(TOOL, "a", 0), cev(OUT, "a", 10)]);
         assert_eq!(m.len(), 1);
-        assert_eq!(m[0]["who"], json!("a-1-10"), "the match is the event that completed the chain");
+        assert_eq!(m[0]["who"], json!("a-0-10"), "the match is the event that completed the chain");
         let info = &m[0]["correlation"];
         assert_eq!(info["key"], json!("a"));
-        assert_eq!(info["steps"]["tool"]["who"], json!("a-0-0"));
-        assert_eq!(info["steps"]["tool"]["count"], json!(1));
-        assert_eq!(info["steps"]["outbound"]["host"], json!({"name": "a"}));
+        assert_eq!(info["query"], json!("tool THEN outbound"));
+        assert_eq!(info["absent"], Value::Null);
+        assert_eq!(info["leaves"]["tool"]["who"], json!("a-1-0"));
+        assert_eq!(info["leaves"]["tool"]["count"], json!(1));
+        assert_eq!(info["leaves"]["outbound"]["host"], json!({"name": "a"}));
         // The chain was reset: a second outbound alone is nothing.
-        assert!(feed(&rule, &mut rt, vec![cev(1, "a", 20)]).is_empty());
+        assert!(feed(&rule, &mut rt, vec![cev(OUT, "a", 20)]).is_empty());
         let text = rt.match_str(&rule, &m[0], None);
-        assert!(text.starts_with("Correlated events for a (tool -> outbound) between "), "{text}");
+        assert!(text.starts_with("Correlated events for a (tool THEN outbound) between "), "{text}");
     }
 
     #[test]
-    fn correlation_ordered_needs_order_window_and_same_pivot() {
-        let (rule, mut rt) = corr("");
-        assert!(feed(&rule, &mut rt, vec![cev(1, "a", 0), cev(0, "a", 5)]).is_empty(), "wrong order");
-        let (rule, mut rt) = corr("");
-        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 61)]).is_empty(), "outside the window of the first step");
-        let (rule, mut rt) = corr("");
-        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "b", 5)]).is_empty(), "different pivot");
-        let (rule, mut rt) = corr("");
-        // The window is measured from the first step: a later start event does not move it.
-        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(0, "a", 50), cev(1, "a", 70)]).is_empty());
-        let (rule, mut rt) = corr("");
-        assert_eq!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 60)]).len(), 1, "exactly timeframe is inside");
+    fn correlation_then_needs_order_window_and_same_pivot() {
+        let (rule, mut rt) = corr();
+        assert!(feed(&rule, &mut rt, vec![cev(OUT, "a", 0), cev(TOOL, "a", 5)]).is_empty(), "wrong order");
+        let (rule, mut rt) = corr();
+        assert!(feed(&rule, &mut rt, vec![cev(TOOL, "a", 0), cev(OUT, "a", 61)]).is_empty(), "outside the window of the first event");
+        let (rule, mut rt) = corr();
+        assert!(feed(&rule, &mut rt, vec![cev(TOOL, "a", 0), cev(OUT, "b", 5)]).is_empty(), "different pivot");
+        let (rule, mut rt) = corr();
+        // The window is measured from the first event: a later start event does not move it.
+        assert!(feed(&rule, &mut rt, vec![cev(TOOL, "a", 0), cev(TOOL, "a", 50), cev(OUT, "a", 70)]).is_empty());
+        let (rule, mut rt) = corr();
+        assert_eq!(feed(&rule, &mut rt, vec![cev(TOOL, "a", 0), cev(OUT, "a", 60)]).len(), 1, "exactly timeframe is inside");
     }
 
     #[test]
     fn correlation_state_survives_between_runs_and_pivots_are_independent() {
-        let (rule, mut rt) = corr("");
-        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(0, "b", 1)]).is_empty());
-        let m = feed(&rule, &mut rt, vec![cev(1, "b", 5), cev(1, "a", 6)]);
+        let (rule, mut rt) = corr();
+        assert!(feed(&rule, &mut rt, vec![cev(TOOL, "a", 0), cev(TOOL, "b", 1)]).is_empty());
+        let m = feed(&rule, &mut rt, vec![cev(OUT, "b", 5), cev(OUT, "a", 6)]);
         assert_eq!(m.iter().map(|d| d["correlation"]["key"].clone()).collect::<Vec<_>>(), vec![json!("b"), json!("a")]);
     }
 
     #[test]
-    fn correlation_unordered_and_num_events() {
-        let (rule, mut rt) = corr("ordered: false\n");
-        assert_eq!(feed(&rule, &mut rt, vec![cev(1, "a", 0), cev(0, "a", 3)]).len(), 1);
-        let rule = rule_from("type: correlation\nquery_key: host.name\ntimeframe: {minutes: 15}\ncorrelation_steps:\n- {name: fail, num_events: 3, filter: [{term: {k: f}}]}\n- {name: ok, filter: [{term: {k: o}}]}\n");
-        let mut rt = RuleType::new(&rule).unwrap();
-        let events = vec![cev(0, "a", 0), cev(0, "a", 1), cev(1, "a", 2), cev(0, "a", 3), cev(1, "a", 4)];
-        let m = feed(&rule, &mut rt, events);
+    fn correlation_and_or_and_num_events() {
+        let (rule, mut rt) = corr_rule(&[("outbound", 1), ("tool", 1)], "tool and outbound", 1);
+        assert_eq!(feed(&rule, &mut rt, vec![cev(OUT, "a", 0), cev(TOOL, "a", 3)]).len(), 1, "AND takes any order");
+        // ok is leaf 1: it must follow the third failure, the one before does not count.
+        let (rule, mut rt) = corr_rule(&[("fail", 3), ("ok", 1)], "fail THEN ok", 1);
+        let m = feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(0, "a", 1), cev(1, "a", 2), cev(0, "a", 3), cev(1, "a", 4)]);
         assert_eq!(m.len(), 1);
-        assert_eq!(m[0]["who"], json!("a-1-4"), "the success before the third failure does not count");
-        assert_eq!(m[0]["correlation"]["steps"]["fail"]["count"], json!(3));
-    }
-
-    fn absent_rule() -> (Rule, RuleType) {
-        let rule = rule_from("type: correlation\nquery_key: host.name\ntimeframe: {hours: 2}\ncorrelation_steps:\n- {name: started, filter: [{term: {k: s}}]}\n- {name: finished, absent: true, filter: [{term: {k: e}}]}\n");
-        let rt = RuleType::new(&rule).unwrap();
-        (rule, rt)
+        assert_eq!(m[0]["who"], json!("a-1-4"));
+        assert_eq!(m[0]["correlation"]["leaves"]["fail"]["count"], json!(3));
+        assert_eq!(m[0]["correlation"]["leaves"]["ok"]["count"], json!(1));
+        // Either failure kind, then a success; the other branch's leaf stays null.
+        let (rule, mut rt) = corr_rule(&[("rdp", 2), ("ssh", 2), ("success", 1)], "(ssh OR rdp) THEN success", 1);
+        let m = feed(&rule, &mut rt, vec![cev(1, "a", 0), cev(0, "a", 1), cev(0, "a", 2), cev(2, "a", 3)]);
+        assert_eq!(m.len(), 1);
+        let leaves = &m[0]["correlation"]["leaves"];
+        assert_eq!((&leaves["rdp"]["count"], &leaves["ssh"]["count"]), (&json!(2), &json!(1)));
+        let (rule, mut rt) = corr_rule(&[("rdp", 2), ("ssh", 2), ("success", 1)], "(ssh OR rdp) THEN success", 1);
+        let m = feed(&rule, &mut rt, vec![cev(0, "a", 1), cev(0, "a", 2), cev(2, "a", 3)]);
+        assert_eq!(m[0]["correlation"]["leaves"]["ssh"], Value::Null);
+        assert!(feed(&rule, &mut rt, vec![cev(1, "a", 10), cev(0, "a", 11), cev(2, "a", 12)]).is_empty(), "one of each is not enough");
     }
 
     #[test]
-    fn correlation_absent_step_fires_at_the_deadline() {
+    fn correlation_document_matching_several_leaves_counts_once() {
+        let both = |minute| {
+            let (_, ev) = cev(0, "a", minute);
+            vec![(vec![0, 1], ev)]
+        };
+        let mut out = Vec::new();
+        // AND: the document completes the chain and does not start the next one.
+        let (rule, mut rt) = corr_rule(&[("x", 1), ("y", 1)], "x AND y", 1);
+        rt.add_correlation(&rule, both(0), &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 1)]).is_empty());
+        // THEN is strict whatever the leaf order: the second side needs a later document.
+        for query in ["x THEN y", "y THEN x"] {
+            let (rule, mut rt) = corr_rule(&[("x", 1), ("y", 1)], query, 1);
+            let mut out = Vec::new();
+            rt.add_correlation(&rule, both(0), &mut out);
+            assert!(out.is_empty(), "{query}");
+            let second = if query == "x THEN y" { 1 } else { 0 };
+            assert_eq!(feed(&rule, &mut rt, vec![cev(second, "a", 1)]).len(), 1, "{query}");
+        }
+    }
+
+    #[test]
+    fn correlation_events_outside_the_query_start_nothing() {
+        // finished (leaf 0) alone does not open a chain that started would then complete late.
+        let (rule, mut rt) = corr_rule(&[("finished", 1), ("started", 1)], "started THEN NOT finished", 2);
+        let mut out = feed(&rule, &mut rt, vec![cev(0, "a", 0)]);
+        rt.garbage_collect(&rule, 1_700_000_000_000_000 + 500 * MIN, &mut out);
+        assert!(out.is_empty());
+    }
+
+    /// `finished` is leaf 0, `started` leaf 1.
+    fn absent_rule() -> (Rule, RuleType) {
+        corr_rule(&[("finished", 1), ("started", 1)], "started THEN NOT finished", 2)
+    }
+
+    #[test]
+    fn correlation_then_not_fires_at_the_deadline() {
         let (rule, mut rt) = absent_rule();
         let mut out = Vec::new();
-        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(0, "b", 1), cev(1, "b", 30)]).is_empty());
+        assert!(feed(&rule, &mut rt, vec![cev(1, "a", 0), cev(1, "b", 1), cev(0, "b", 30)]).is_empty());
         rt.garbage_collect(&rule, 1_700_000_000_000_000 + 119 * MIN, &mut out);
         assert!(out.is_empty(), "still inside the window");
         rt.garbage_collect(&rule, 1_700_000_000_000_000 + 121 * MIN, &mut out);
         assert_eq!(out.len(), 1, "only a lacks its end");
         assert_eq!(out[0]["correlation"]["key"], json!("a"));
-        assert_eq!(out[0]["correlation"]["absent"], json!("finished"));
-        assert_eq!(out[0]["who"], json!("a-0-0"));
+        assert_eq!(out[0]["correlation"]["absent"], json!(["finished"]));
+        assert_eq!(out[0]["who"], json!("a-1-0"));
         assert_eq!(out[0]["correlation"]["last"], json!(to_iso(1_700_000_000_000_000 + 120 * MIN)));
         let text = rt.match_str(&rule, &out[0], None);
-        assert!(text.contains("no finished event followed within"), "{text}");
+        assert!(text.contains("(started THEN NOT finished) started at ") && text.contains(" and no finished within 2:00:00"), "{text}");
         rt.garbage_collect(&rule, 1_700_000_000_000_000 + 200 * MIN, &mut out);
         assert_eq!(out.len(), 1, "fires once");
     }
 
     #[test]
-    fn correlation_absent_step_fires_when_a_late_event_arrives() {
+    fn correlation_then_not_fires_when_a_late_event_arrives() {
         let (rule, mut rt) = absent_rule();
         // The end shows up after the deadline: too late, the first chain is a match and the late event starts nothing.
-        let m = feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 130)]);
+        let m = feed(&rule, &mut rt, vec![cev(1, "a", 0), cev(0, "a", 130)]);
         assert_eq!(m.len(), 1);
         // A new start after the deadline opens a fresh chain.
-        let m = feed(&rule, &mut rt, vec![cev(0, "c", 0), cev(0, "c", 150)]);
+        let m = feed(&rule, &mut rt, vec![cev(1, "c", 0), cev(1, "c", 150)]);
         assert_eq!(m.len(), 1);
     }
 
     #[test]
+    fn correlation_and_not_counts_from_the_start_of_the_chain() {
+        // a (leaf 0) and c (leaf 2) without any b (leaf 1) in the window.
+        let (rule, mut rt) = corr_rule(&[("a", 1), ("b", 1), ("c", 1)], "a AND c AND NOT b", 1);
+        let mut out = feed(&rule, &mut rt, vec![cev(0, "x", 0), cev(1, "x", 1), cev(2, "x", 2)]);
+        out.extend(feed(&rule, &mut rt, vec![cev(0, "y", 0), cev(2, "y", 2)]));
+        rt.garbage_collect(&rule, 1_700_000_000_000_000 + 90 * MIN, &mut out);
+        assert_eq!(out.len(), 1, "x saw a b");
+        assert_eq!(out[0]["correlation"]["key"], json!("y"));
+        assert_eq!(out[0]["who"], json!("y-2-2"), "the match is the event that completed the positive part");
+        // THEN NOT: a b before the positive part completed does not count.
+        let (rule, mut rt) = corr_rule(&[("a", 1), ("b", 1), ("c", 1)], "(a AND c) THEN NOT b", 1);
+        let mut out = feed(&rule, &mut rt, vec![cev(0, "x", 0), cev(1, "x", 1), cev(2, "x", 2)]);
+        rt.garbage_collect(&rule, 1_700_000_000_000_000 + 90 * MIN, &mut out);
+        assert_eq!(out.len(), 1);
+        // A leaf may be positive and negated: one start and no second one.
+        let (rule, mut rt) = corr_rule(&[("a", 1)], "a THEN NOT a", 1);
+        let mut out = feed(&rule, &mut rt, vec![cev(0, "x", 0), cev(0, "x", 5), cev(0, "y", 0)]);
+        rt.garbage_collect(&rule, 1_700_000_000_000_000 + 90 * MIN, &mut out);
+        assert_eq!(out.iter().map(|d| d["correlation"]["key"].clone()).collect::<Vec<_>>(), vec![json!("y")]);
+        // num_events on a negated leaf: fewer than that many.
+        let (rule, mut rt) = corr_rule(&[("a", 1), ("b", 2)], "a THEN NOT b", 1);
+        let mut out = feed(&rule, &mut rt, vec![cev(0, "x", 0), cev(1, "x", 5), cev(0, "y", 0), cev(1, "y", 5), cev(1, "y", 6)]);
+        rt.garbage_collect(&rule, 1_700_000_000_000_000 + 90 * MIN, &mut out);
+        assert_eq!(out.iter().map(|d| d["correlation"]["key"].clone()).collect::<Vec<_>>(), vec![json!("x")]);
+    }
+
+    #[test]
     fn correlation_replay_does_not_alert_twice() {
-        let (rule, mut rt) = corr("");
+        let (rule, mut rt) = corr();
         rt.suppress_until(1_700_000_000_000_000 + 10 * MIN);
-        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 0), cev(1, "a", 10)]).is_empty());
-        assert_eq!(feed(&rule, &mut rt, vec![cev(0, "a", 11), cev(1, "a", 12)]).len(), 1);
+        assert!(feed(&rule, &mut rt, vec![cev(TOOL, "a", 0), cev(OUT, "a", 10)]).is_empty());
+        assert_eq!(feed(&rule, &mut rt, vec![cev(TOOL, "a", 11), cev(OUT, "a", 12)]).len(), 1);
         // A chain started before the restart still completes after it.
-        let (rule, mut rt) = corr("");
+        let (rule, mut rt) = corr();
         rt.suppress_until(1_700_000_000_000_000 + 10 * MIN);
-        assert!(feed(&rule, &mut rt, vec![cev(0, "a", 5)]).is_empty());
-        assert_eq!(feed(&rule, &mut rt, vec![cev(1, "a", 20)]).len(), 1);
+        assert!(feed(&rule, &mut rt, vec![cev(TOOL, "a", 5)]).is_empty());
+        assert_eq!(feed(&rule, &mut rt, vec![cev(OUT, "a", 20)]).len(), 1);
     }
 
     fn matches_of(rule: &Rule, ts: Ts, payload: Value) -> Vec<Doc> {

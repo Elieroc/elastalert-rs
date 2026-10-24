@@ -1991,9 +1991,10 @@ Correlation
 
    New in ElastAlert 3: a rule using this type does not load in ElastAlert 2.
 
-``correlation``: This rule matches when events matching several steps happen on the same ``query_key`` value (a
-machine, an IP, a user) within ``timeframe`` of the first one. Every step is a search of its own, so it also works on
-OpenSearch and across indices. It replaces EQL ``sequence`` queries, which ElastAlert 3 does not run.
+``correlation``: This rule matches when events of several searches, the leaves, happen on the same ``query_key`` value
+(a machine, an IP, a user) within ``timeframe`` of the first one, as ``correlation_query`` combines them with ``AND``,
+``OR``, ``THEN`` and ``NOT``. Every leaf is a search of its own, so it also works on OpenSearch and across indices. It
+replaces EQL ``sequence`` queries, which ElastAlert 3 does not run.
 
 .. code-block:: yaml
 
@@ -2002,58 +2003,109 @@ OpenSearch and across indices. It replaces EQL ``sequence`` queries, which Elast
     index: auth-*
     query_key: [user.name, source.ip]    # the pivot; a list is a compound key, as elsewhere
     timeframe: {minutes: 15}             # measured from the first event of the chain
-    correlation_steps:
-    - name: failures
-      num_events: 10                     # at least 10 events before the next step counts (default 1)
-      filter:
-      - term: {event.outcome: failure}
-    - name: success
-      filter:
-      - term: {event.outcome: success}
+    correlation_leaves:
+      ssh_fail:
+        num_events: 10                   # at least 10 events for the leaf to count (default 1)
+        filter:
+        - term: {event.outcome: failure}
+        - term: {service.name: sshd}
+      rdp_fail:
+        num_events: 10
+        filter:
+        - term: {event.code: "4625"}
+      success:
+        filter:
+        - term: {event.outcome: success}
+    correlation_query: (ssh_fail OR rdp_fail) THEN success
     alert_text: "{0} compromised from {1}"
     alert_text_args: [user.name, source.ip]
     alert: [email]
 
-This rule requires three additional options:
+This rule requires four additional options:
 
 ``query_key``: The pivot. Documents without a value for it are skipped.
 
 ``timeframe``: How long a chain stays open, measured from its first event.
 
-``correlation_steps``: At least two steps. Each step has:
+``correlation_leaves``: A map of leaf name to leaf. Names use letters, digits, ``_`` and ``-``, and cannot be ``AND``,
+``OR``, ``THEN`` or ``NOT``. Each leaf has:
 
-- ``name``: letters, digits, ``_`` and ``-``; unique within the rule.
-- ``filter``: a non-empty list of Query DSL filters. The rule's own ``filter`` is added to every step.
-- ``num_events`` (optional): events needed in the step. Default 1.
-- ``index`` (optional): search another index for this step. Default: the rule's ``index``.
-- ``query_key`` (optional): field holding the pivot in this step's documents when it is not named like the rule's
+- ``filter``: a non-empty list of Query DSL filters. The rule's own ``filter`` is added to every leaf.
+- ``num_events`` (optional): events needed for the leaf to count. Default 1. Under ``NOT``, the leaf is violated
+  only once it reaches that many events.
+- ``index`` (optional): search another index for this leaf. Default: the rule's ``index``.
+- ``query_key`` (optional): field holding the pivot in this leaf's documents when it is not named like the rule's
   single-field ``query_key``. The value is copied under the rule's name.
-- ``absent: true`` (optional, last step only): the chain matches when nothing of this step happened within
-  ``timeframe`` of the first event.
 
-Optional:
+``correlation_query``: How the leaves combine. Every leaf must appear in it; a leaf may appear more than once.
 
-``ordered``: ``true`` (default): the steps must happen in sequence. ``false``: in any order, every step must be
-reached. Cannot be combined with ``absent``.
+- ``a AND b``: both, in any order.
+- ``a OR b``: either.
+- ``a THEN b``: ``b`` after ``a``. The order is strict: ``b`` counts only for events after the one that completed
+  ``a`` (with ``num_events: 10`` on ``a``, after the tenth). Inside a group, such as ``a THEN (b AND c)``, the order
+  of the group's operands is free.
+- ``NOT``: what must not happen within ``timeframe`` of the first event. Only at the top of the query, next to
+  something that happens: ``x AND NOT y`` (no ``y`` from the start of the chain) or ``x THEN NOT y`` (no ``y`` after
+  ``x`` completed). ``NOT`` alone, under ``OR`` or inside parentheses is rejected.
+- Parentheses group. Different operators at the same level need them: ``(a AND b) THEN c``, never ``a AND b THEN c``.
+
+Keywords are case-insensitive; this documentation writes them in upper case.
 
 Behaviour:
 
-- A chain starts with the first event of the first step (any step when ``ordered: false``) and expires ``timeframe``
-  after it, whatever happens in between. A later event of the first step does not move the window. Events of a step
-  other than the awaited one are ignored.
+- A chain starts with the first event that counts for the query (not an event under ``NOT``), and expires
+  ``timeframe`` after it, whatever happens in between. A later event of the same leaf does not move the window. Events
+  the query does not wait for at that point are ignored.
+- A document matching several leaves is one event: it counts for each of them at once, never on both sides of a
+  ``THEN`` (``a THEN b`` needs a later document for ``b``), and once it completes a chain it does not start the next.
 - One alert per chain, then the pivot starts over. ``realert`` and ``silence`` work on the pivot as for other types.
-- The match is the document that completed the chain (for ``absent``, the document that started it, and the alert goes
-  out once the window is over). ``@timestamp`` is that document's.
-- A ``correlation`` field is added to the match: ``key``, ``first``, ``last``, ``absent`` (the missing step or
-  ``null``) and ``steps.<name>``, the newest document of each step with ``count``, ``first`` and ``last`` laid over its
-  fields. For example ``alert_text_args: [correlation.steps.failures.source.ip]``.
+- Without ``NOT``, the match is the document that completed the chain and ``@timestamp`` is that document's. With
+  ``NOT``, the match is the document that completed the rest of the query, and the alert goes out once the window is
+  over without the negated part. A negated part that happens ends the chain without an alert.
+- A ``correlation`` field is added to the match: ``key``, ``query`` (the query with upper-case keywords), ``first``,
+  ``last``, ``absent`` (the negated parts when the match is the end of the window, otherwise ``null``) and
+  ``leaves.<name>``: the newest document of each leaf with ``count``, ``first`` and ``last`` laid over its fields, or
+  ``null`` for a leaf that saw nothing (the other branch of an ``OR``). For example
+  ``alert_text_args: [correlation.leaves.ssh_fail.source.ip]``.
 - State is kept in memory. After a restart or a rule reload the last ``timeframe`` is read again to rebuild open chains;
   chains that already completed are not alerted twice. A fresh start (no previous run) reads ``buffer_time`` back, as
   other types.
 - Whole documents are fetched (no field projection).
 - Late-indexed documents (older than the end of the last run) are missed, as for other types.
 
-Example with a missing step: a backup job that started but did not finish within two hours.
+Example with a sequence: failed logins, a success, a privilege escalation, then persistence on the same host and user.
+
+.. code-block:: yaml
+
+    name: Brute force, access, escalation
+    type: correlation
+    index: logs-*
+    query_key: [host.name, user.name]
+    timeframe: {minutes: 30}
+    correlation_leaves:
+      fail:
+        num_events: 10
+        filter:
+        - term: {event.outcome: failure}
+        - term: {event.category: authentication}
+      success:
+        filter:
+        - term: {event.outcome: success}
+        - term: {event.category: authentication}
+      sudo:
+        filter:
+        - term: {process.name: sudo}
+      new_admin:
+        filter:
+        - term: {event.action: added-member-to-group}
+        - term: {group.name: wheel}
+      persistence:
+        filter:
+        - terms: {event.action: [crontab-modified, systemd-unit-created]}
+    correlation_query: fail THEN success THEN (sudo OR new_admin) THEN persistence
+    alert: [email]
+
+Example with a missing part: a backup job that started but neither finished nor failed within two hours.
 
 .. code-block:: yaml
 
@@ -2062,17 +2114,21 @@ Example with a missing step: a backup job that started but did not finish within
     index: jobs-*
     query_key: host.name
     timeframe: {hours: 2}
-    correlation_steps:
-    - name: started
-      filter:
-      - term: {event.action: backup-start}
-    - name: finished
-      absent: true
-      filter:
-      - term: {event.action: backup-end}
+    correlation_leaves:
+      started:
+        filter:
+        - term: {event.action: backup-start}
+      finished:
+        filter:
+        - term: {event.action: backup-end}
+      failed:
+        filter:
+        - term: {event.action: backup-error}
+    correlation_query: started THEN NOT (finished OR failed)
     alert: [slack]
 
-Rejected at load: fewer than two steps, duplicate or invalid step names, unknown step options, a missing ``query_key``
-or ``timeframe``, ``absent`` anywhere but on the last step or with ``ordered: false`` or ``num_events``, ``eql`` /
-``esql`` filters, ``use_count_query``, ``use_terms_query``, a step ``query_key`` with a compound rule ``query_key``.
-``test-rule --data`` / ``--use-downloaded`` cannot replay it, since each step needs its own search.
+Rejected at load: a missing ``query_key``, ``timeframe``, ``correlation_leaves`` or ``correlation_query``, invalid
+leaf names, unknown leaf options, a leaf that the query does not use or a name that is not a leaf, a query that is a
+single leaf, mixed operators without parentheses, ``NOT`` anywhere but at the top, ``eql`` / ``esql`` filters,
+``use_count_query``, ``use_terms_query``, a leaf ``query_key`` with a compound rule ``query_key``.
+``test-rule --data`` / ``--use-downloaded`` cannot replay it, since each leaf needs its own search.

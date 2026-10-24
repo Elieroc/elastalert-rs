@@ -20,7 +20,7 @@ Toolchain: Rust 1.99, edition 2024 (let-chains used).
 Integration harnesses need a throwaway Elasticsearch and are not part of `cargo test`:
 - `tests/parity/`: `seed.py` loads deterministic data; run Python ElastAlert 2.31.0 and this binary with `--debug --start 2026-10-01T08:00:00Z --end 2026-10-01T10:05:00Z`, then `diff.py py.log rs.log`. The alerts must be identical. Re-run this after any change to rule types, query planning or alert text.
 - `tests/alerters/sink.py`: local SMTP + HTTP receiver for the email/slack/post/command alerters and retry behaviour.
-- `bench/`: 400k-document dataset and 500-rule folder for the performance numbers in `docs/source/differences.rst`.
+- `bench/`: 400k-document dataset, 500-rule folder and correlation rules (`rules-corr`, `config-corr-rs.yaml`) for the performance numbers in `docs/source/differences.rst`.
 
 Unit tests live in `#[cfg(test)] mod tests` at the bottom of each `src/*.rs`. `tests/golden/*.txt` are summary tables printed by upstream, compared byte for byte via `include_str!` in `src/alert.rs`.
 
@@ -31,6 +31,7 @@ Single crate, single binary. Process model:
 - `main.rs`: CLI (clap, flag names copied from upstream like `--pin_rules`), startup recovery of pending alerts/aggregations from the writeback index, one tokio task per rule (`rule_task`), hot-reload loop (file hashes of rules + imports; a reloaded rule keeps its state), graceful shutdown (finish running rules, flush writeback, 10 s cap).
 - `engine.rs`: one rule run. Plans the time range, queries pages, feeds the rule type, then silence/realert, aggregation groups, enhancement (top counts, `_mget` of the full doc for matches only), and per-alerter delivery with backoff retry. `RuleState` is owned by its task; `Ctx` holds the only shared things: `Es` client, `Silences` (in-memory, refreshed every `run_every`), writeback channel.
 - `types.rs`: `RuleType` enum dispatching to per-type structs. Three entry points: `add_data` (hits), `add_count` (`use_count_query`), `add_aggregation` (aggregation rule types: `metric_aggregation`, `percentage_match`, `spike_aggregation`; `Kind::is_agg_query`). `EventWindow` stores compact `(ts, count)` entries, not full docs. Timestamps are `i64` micros UTC (`time.rs`).
+- `correlation.rs`: `correlation_query` parser (`AND`/`OR`/`THEN`/`NOT` over `correlation_leaves`, top-level `NOT` split off at load) and `Progress`, the per-chain evaluation used by `types.rs`.
 - `rule.rs`: YAML loading, `import:` chains, `$key$` references, env expansion, defaults inherited from `config.yaml`, load-time rejection of unsupported options, and per-type field projection (only the fields the type needs are fetched from ES; `fetch_full_source` / `include` opt out).
 - `es.rs`: raw REST client over reqwest (no official ES crate) for ES 7.x/8.x and OpenSearch 2.x: PIT + `search_after` when available, scroll fallback, `_bulk`, `_mget`, `--es_debug(_trace)` tracing.
 - `writeback.rs`: single bulk-writer task (flush every 1 s or 500 docs), client-side UUIDv7 ids so retries are idempotent.

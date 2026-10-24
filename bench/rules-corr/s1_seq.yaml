@@ -1,0 +1,19 @@
+name: s1 sequence
+type: correlation
+timeframe: {minutes: 15}
+index: bench-fat
+query_key: user.name
+realert: {minutes: 0}
+alert_text_type: alert_text_only
+alert_text: "M {0} {1}"
+alert_text_args: [user.name, "@timestamp"]
+alert: debug
+correlation_leaves:
+  fail:
+    num_events: 5
+    filter:
+    - term: {event.outcome.keyword: failure}
+  ok:
+    filter:
+    - term: {event.outcome.keyword: success}
+correlation_query: fail THEN ok

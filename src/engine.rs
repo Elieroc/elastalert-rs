@@ -105,8 +105,8 @@ pub struct RuleState {
     bucket_offset: i64,
     /// Hash of `_id` -> event time, to skip hits already seen in overlapping windows.
     seen: FxHashMap<u64, Ts>,
-    /// `correlation`: the step being queried, and the tagged events (with their dedup hash) gathered for the range.
-    corr_step: Option<usize>,
+    /// `correlation`: the leaf being queried, and the tagged events (with their dedup hash) gathered for the range.
+    corr_leaf: Option<usize>,
     corr_buf: Vec<(usize, Event, u64)>,
     /// Documents to query instead of ES (`test-rule --data`).
     pub mock: Option<Vec<Doc>>,
@@ -153,7 +153,7 @@ impl RuleState {
             minimum_starttime: None,
             bucket_offset: 0,
             seen: FxHashMap::default(),
-            corr_step: None,
+            corr_leaf: None,
             corr_buf: Vec::new(),
             mock: None,
             has_run_once: false,
@@ -179,7 +179,7 @@ impl RuleState {
             minimum_starttime: None,
             bucket_offset: 0,
             seen: FxHashMap::default(),
-            corr_step: None,
+            corr_leaf: None,
             corr_buf: Vec::new(),
             mock: None,
             has_run_once: false,
@@ -316,8 +316,8 @@ impl RuleState {
             if scrolling { " (scrolling..)" } else { "" }
         );
         let events = self.process_hits(&mut hits)?;
-        if let Some(step) = self.corr_step {
-            self.stage_step_events(step, events);
+        if let Some(leaf) = self.corr_leaf {
+            self.stage_leaf_events(leaf, events);
             return Ok(());
         }
         let before = events.len();
@@ -382,16 +382,16 @@ impl RuleState {
         self.scroll_pages(ctx, start, end, index, body, matches).await
     }
 
-    /// `correlation` rules: one search per step (its filter added to the rule's), all events merged by time and handed
-    /// to the rule type together. Dedup hashes are only recorded once every step succeeded, so a failed run reads the range again.
+    /// `correlation` rules: one search per leaf (its filter added to the rule's), all events merged by time and handed
+    /// to the rule type together. Dedup hashes are only recorded once every leaf succeeded, so a failed run reads the range again.
     async fn correlation_query(&mut self, ctx: &Ctx, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
-        let spec = self.rule.correlation.clone().expect("correlation rules always have steps");
+        let spec = self.rule.correlation.clone().expect("correlation rules always have leaves");
         let (base_filter, base_index) = (self.rule.filter.clone(), self.rule.index.clone());
         let mut result = Ok(());
-        for (i, step) in spec.steps.iter().enumerate() {
-            self.rule.filter = base_filter.iter().chain(&step.filter).cloned().collect();
-            self.rule.index = step.index.clone().unwrap_or_else(|| base_index.clone());
-            self.corr_step = Some(i);
+        for (i, leaf) in spec.leaves.iter().enumerate() {
+            self.rule.filter = base_filter.iter().chain(&leaf.filter).cloned().collect();
+            self.rule.index = leaf.index.clone().unwrap_or_else(|| base_index.clone());
+            self.corr_leaf = Some(i);
             result = async {
                 let index = self.index_for(start, end)?;
                 self.hit_search(ctx, &index, start, end, &mut Vec::new()).await
@@ -401,36 +401,48 @@ impl RuleState {
                 break;
             }
         }
-        (self.rule.filter, self.rule.index, self.corr_step) = (base_filter, base_index, None);
+        (self.rule.filter, self.rule.index, self.corr_leaf) = (base_filter, base_index, None);
         let mut staged = std::mem::take(&mut self.corr_buf);
         result?;
         for (_, ev, hash) in &staged {
             self.seen.insert(*hash, ev.ts);
         }
-        staged.sort_by_key(|(step, ev, _)| (ev.ts, *step));
-        self.rtype.add_correlation(&self.rule, staged.into_iter().map(|(step, ev, _)| (step, ev)).collect(), matches);
+        let doc_ref = |ev: &Event| -> Option<(String, String)> {
+            let get = |k: &str| ev.doc.get(k).and_then(Value::as_str).map(String::from);
+            Some((get("_index")?, get("_id")?))
+        };
+        staged.sort_by_cached_key(|(leaf, ev, _)| (ev.ts, doc_ref(ev), *leaf));
+        // A document matching several leaves is one event with all of them.
+        let mut events: Vec<(Vec<usize>, Event)> = Vec::with_capacity(staged.len());
+        for (leaf, ev, _) in staged {
+            match events.last_mut() {
+                Some((tags, last)) if last.ts == ev.ts && doc_ref(last).is_some() && doc_ref(last) == doc_ref(&ev) => tags.push(leaf),
+                _ => events.push((vec![leaf], ev)),
+            }
+        }
+        self.rtype.add_correlation(&self.rule, events, matches);
         Ok(())
     }
 
-    /// Keeps the new events of a correlation step: the pivot value is mapped from the step's own field, events without one are skipped.
-    fn stage_step_events(&mut self, step: usize, events: Vec<Event>) {
+    /// Keeps the new events of a correlation leaf: the pivot value is mapped from the leaf's own field, events without one are skipped.
+    fn stage_leaf_events(&mut self, leaf: usize, events: Vec<Event>) {
         let rule = &self.rule;
-        let step_key = rule.correlation.as_ref().and_then(|c| c.steps[step].query_key.clone());
+        let leaf_key = rule.correlation.as_ref().and_then(|c| c.leaves[leaf].query_key.clone());
         let qk = rule.query_key.clone().unwrap_or_default();
         let before = events.len();
         let mut kept = 0;
         for mut ev in events {
-            if let Some(sk) = &step_key
+            if let Some(sk) = &leaf_key
                 && let Some(v) = field::lookup(&ev.doc, sk).cloned()
             {
                 ev.doc.insert(qk.clone(), v);
             }
             let parts = if rule.compound_query_key.is_empty() { std::slice::from_ref(&qk) } else { &rule.compound_query_key[..] };
-            if step_key.is_some() && !ev.doc.contains_key(&qk) || parts.iter().any(|k| field::lookup(&ev.doc, k).is_none_or(Value::is_null)) {
+            if leaf_key.is_some() && !ev.doc.contains_key(&qk) || parts.iter().any(|k| field::lookup(&ev.doc, k).is_none_or(Value::is_null)) {
                 continue;
             }
             let hash = match ev.doc.get("_id").and_then(Value::as_str) {
-                Some(id) => id_hash(&format!("{step}\0{id}")),
+                Some(id) => id_hash(&format!("{leaf}\0{id}")),
                 None => 0,
             };
             if hash != 0 && self.seen.contains_key(&hash) {
@@ -438,9 +450,9 @@ impl RuleState {
                 continue;
             }
             kept += 1;
-            self.corr_buf.push((step, ev, hash));
+            self.corr_buf.push((leaf, ev, hash));
         }
-        log::debug!("Rule {}: step {step} kept {kept} of {before} events", rule.name);
+        log::debug!("Rule {}: leaf {} kept {kept} of {before} events", rule.name, rule.correlation.as_ref().map_or("", |c| c.leaves[leaf].name.as_str()));
     }
 
     /// EQL / ES|QL rules: one request per range, no paging (upstream cannot page them either), so results beyond
@@ -520,7 +532,7 @@ impl RuleState {
     /// Mock data (`test-rule --data`): same time filter as upstream's mock (`start <= ts < end`).
     fn run_mock(&mut self, ctx: &Ctx, start: Ts, end: Ts, matches: &mut Vec<Doc>) -> Result<()> {
         if self.rule.kind == Kind::Correlation {
-            bail!("test-rule --data / --use-downloaded cannot replay correlation rules: each step is a search of its own");
+            bail!("test-rule --data / --use-downloaded cannot replay correlation rules: each leaf is a search of its own");
         }
         if self.aggregating() {
             bail!("test-rule --data / --use-downloaded cannot replay aggregation rule types (metric_aggregation, percentage_match, spike_aggregation)");

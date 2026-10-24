@@ -23,8 +23,8 @@ clusters, Windows and macOS.
 New in ElastAlert 3
 ===================
 
-- The :ref:`correlation <correlation>` rule type: events of several searches on the same pivot within a window,
-  including a missing step.
+- The :ref:`correlation <correlation>` rule type: events of several searches (leaves) on the same pivot within a
+  window, combined with ``AND``, ``OR``, ``THEN`` and ``NOT``.
 - :ref:`active_hours <active_hours>`: ignore matches outside time windows, in a given time zone.
 - :ref:`ingest_timestamp_field <ingest_timestamp_field>`: query on the ingest time, so late documents are found
   exactly once.
@@ -165,6 +165,42 @@ both programs). These are not a benchmark suite; your data and hardware will dif
 
 The difference comes from a compiled runtime without a global interpreter lock, field projection (only the timestamp
 and key fields are read from Elasticsearch), bulk writeback and compact event windows.
+
+:ref:`correlation <correlation>` rules have no ElastAlert 2 counterpart. Same machine and the same 400,000 documents
+over 3 days (6 h ``buffer_time``, ``--debug``, ``query_key: user.name``, median of 3 runs; rules in
+``bench/rules-corr``). Every leaf is a search of its own over whole documents, so the time grows with the number of
+leaves, and the memory with the matches held until the end of the run, each with the documents of its leaves.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 52 16 16 16
+
+   * - ``correlation_query`` (``timeframe``)
+     - Time
+     - Max RSS
+     - Matches
+   * - ``fail THEN ok``, 5 failures (15 min)
+     - 10.4 s
+     - 804 MB
+     - 3,767
+   * - ``fail AND denied``, 3 and 2 events (10 min)
+     - 4.5 s
+     - 525 MB
+     - 4,172
+   * - ``unauth THEN NOT db`` (10 min)
+     - 4.6 s
+     - 469 MB
+     - 7,557
+   * - ``(fail OR denied) THEN ok THEN (web2 AND db)`` (20 min)
+     - 22.9 s
+     - 1,833 MB
+     - 15,995
+   * - ``fail AND web1 AND NOT denied`` (10 min)
+     - 10.4 s
+     - 635 MB
+     - 2,300
+
+The first three rules written with the ``correlation_steps`` of ElastAlert 3.2.0 take the same time (within 3 %).
 
 Migrating from ElastAlert 2
 ===========================

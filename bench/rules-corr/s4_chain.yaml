@@ -1,0 +1,29 @@
+name: s4 chain
+type: correlation
+timeframe: {minutes: 20}
+index: bench-fat
+query_key: user.name
+realert: {minutes: 0}
+alert_text_type: alert_text_only
+alert_text: "M {0} {1}"
+alert_text_args: [user.name, "@timestamp"]
+alert: debug
+correlation_leaves:
+  fail:
+    num_events: 3
+    filter:
+    - term: {event.outcome.keyword: failure}
+  denied:
+    num_events: 3
+    filter:
+    - term: {http.response.status_code: 403}
+  ok:
+    filter:
+    - term: {event.outcome.keyword: success}
+  web2:
+    filter:
+    - term: {host.name.keyword: web-2}
+  db:
+    filter:
+    - term: {host.name.keyword: db-1}
+correlation_query: (fail OR denied) THEN ok THEN (web2 AND db)
