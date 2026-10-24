@@ -1,0 +1,46 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+elastalert3 (formerly elastalert-rs): an alerting daemon in Rust that started as a rewrite of the core of ElastAlert 2 (Python) and now adds features of its own (e.g. the `correlation` rule type, `active_hours`). The crate and binary are still named `elastalert`; versions continue from 3.2.0 (1.x was elastalert-rs). Hard contract: existing ElastAlert 2 `config.yaml` and rule files run **unchanged**, and the writeback documents keep upstream's shapes (new fields additive only). Alert text, silence keys, realert timing, the `gt start / lte end` query range and rule-type math must match upstream: parity first, then speed. Any unsupported option must be **rejected at load** with a message (see the `unsupported` list in `src/rule.rs`), never silently run with different behaviour.
+
+## Commands
+
+```sh
+cargo build --release                 # target/release/elastalert (fat LTO, slow)
+cargo test                            # unit tests, no Elasticsearch needed
+cargo test <name_substring>           # single test, e.g. cargo test import_chain
+cargo run -- --config tests/parity/config.yaml validate   # load config + all rules, no ES
+```
+
+Toolchain: Rust 1.99, edition 2024 (let-chains used).
+
+Integration harnesses need a throwaway Elasticsearch and are not part of `cargo test`:
+- `tests/parity/`: `seed.py` loads deterministic data; run Python ElastAlert 2.31.0 and this binary with `--debug --start 2026-10-01T08:00:00Z --end 2026-10-01T10:05:00Z`, then `diff.py py.log rs.log`. The alerts must be identical. Re-run this after any change to rule types, query planning or alert text.
+- `tests/alerters/sink.py`: local SMTP + HTTP receiver for the email/slack/post/command alerters and retry behaviour.
+- `bench/`: 400k-document dataset and 500-rule folder for the performance numbers in the README.
+
+Unit tests live in `#[cfg(test)] mod tests` at the bottom of each `src/*.rs`. `tests/golden/*.txt` are summary tables printed by upstream, compared byte for byte via `include_str!` in `src/alert.rs`.
+
+## Architecture
+
+Single crate, single binary. Process model (see `replica/architecture.md` for the original design rationale; it is a plan and may differ from the code in details such as logging crates):
+
+- `main.rs`: CLI (clap, flag names copied from upstream like `--pin_rules`), startup recovery of pending alerts/aggregations from the writeback index, one tokio task per rule (`rule_task`), hot-reload loop (file hashes of rules + imports; a reloaded rule keeps its state), graceful shutdown (finish running rules, flush writeback, 10 s cap).
+- `engine.rs`: one rule run. Plans the time range, queries pages, feeds the rule type, then silence/realert, aggregation groups, enhancement (top counts, `_mget` of the full doc for matches only), and per-alerter delivery with backoff retry. `RuleState` is owned by its task; `Ctx` holds the only shared things: `Es` client, `Silences` (in-memory, refreshed every `run_every`), writeback channel.
+- `types.rs`: `RuleType` enum dispatching to per-type structs. Three entry points: `add_data` (hits), `add_count` (`use_count_query`), `add_aggregation` (aggregation rule types: `metric_aggregation`, `percentage_match`, `spike_aggregation`; `Kind::is_agg_query`). `EventWindow` stores compact `(ts, count)` entries, not full docs. Timestamps are `i64` micros UTC (`time.rs`).
+- `rule.rs`: YAML loading, `import:` chains, `$key$` references, env expansion, defaults inherited from `config.yaml`, load-time rejection of unsupported options, and per-type field projection (only the fields the type needs are fetched from ES; `fetch_full_source` / `include` opt out).
+- `es.rs`: raw REST client over reqwest (no official ES crate) for ES 7.x/8.x and OpenSearch 2.x: PIT + `search_after` when available, scroll fallback, `_bulk`, `_mget`, `--es_debug(_trace)` tracing.
+- `writeback.rs`: single bulk-writer task (flush every 1 s or 500 docs), client-side UUIDv7 ids so retries are idempotent.
+- `alert.rs`: alert body/subject (Python `str.format` subset, `minijinja` for jinja), summary tables. `alerters/`: one module per alerter (`mod.rs` = enum, option helpers, `View`; `http.rs` = shared webhook client; `testutil` = rule builder + in-process HTTP capture server for tests), all 44 upstream alerters (the `alert:` names) (`debug`, `email`, `slack`, `post`, `command`); any other alerter name is rejected at load.
+- `testrule.rs`: `test-rule` and `validate` subcommands. `setup.rs`: `create-index`, using mappings embedded from `mappings/` (copied from upstream).
+- `notify.rs`: `notify_email` operator mails. `metrics.rs`: Prometheus endpoint with upstream metric names.
+
+Error model: ordinary errors (ES down, bad query, alerter failure) are logged and retried next run. Only a panic in a rule task counts as an "uncaught exception": error doc to `_error`, optional notify mail, and with `disable_rules_on_error` the rule is parked until its file changes.
+
+## Project records
+
+- `README.md` is the user-facing coverage contract: tables of supported / rejected / ignored config keys, rule options, alerters, and deliberate differences from ElastAlert 2. Update it when behaviour or coverage changes.
+- `replica/features.csv`: every ElastAlert 2 feature with its status here. `replica/build-log.md`: per-milestone log of what was done, measured and found. `replica/recon.md`: notes on the upstream source.

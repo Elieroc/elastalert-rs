@@ -1,7 +1,7 @@
 # Match enhancements
 
 A match enhancement receives each match (the document that triggered the rule, plus fields such as `num_hits`)
-and can change it or drop it before it is alerted. In ElastAlert 2 these are Python classes; elastalert-rs cannot
+and can change it or drop it before it is alerted. In ElastAlert 2 these are Python classes; elastalert3 cannot
 run Python, so the modules are written in Rust and compiled into the binary.
 
 ## Using them in a rule

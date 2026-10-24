@@ -5,10 +5,13 @@
   </picture>
 </p>
 
-# elastalert-rs
+# elastalert3
 
-A Rust rewrite of the core of [ElastAlert 2](https://github.com/jertel/elastalert2): a daemon that queries
-Elasticsearch / OpenSearch on a schedule, applies rules (frequency, spike, new term, ...) and sends alerts.
+An alerting daemon for Elasticsearch / OpenSearch, written in Rust: it queries on a schedule, applies rules
+(frequency, spike, new term, ...) and sends alerts. It started as a Rust rewrite of the core of
+[ElastAlert 2](https://github.com/jertel/elastalert2) and now adds features of its own, such as the `correlation` rule type
+and `active_hours` (see [Differences from ElastAlert 2](#differences-from-elastalert-2)). It was called elastalert-rs up to 1.2.0;
+versions continue from 3.2.0. It is an independent project, not affiliated with Yelp or the ElastAlert 2 maintainers.
 
 It reads **existing ElastAlert 2 rule files and `config.yaml` unchanged** and writes the same writeback documents.
 The goals were drop-in compatibility and speed. It is not a complete port: see [What is covered and what is not](#what-is-covered-and-what-is-not)
@@ -73,18 +76,18 @@ slack_webhook_url: https://hooks.slack.com/services/XXX
 ## Docker
 
 ```sh
-docker build -t elastalert-rs .
+docker build -t elastalert3 .
 docker run -d --name elastalert \
   -v $PWD/config.yaml:/opt/elastalert/config.yaml:ro \
   -v $PWD/rules:/opt/elastalert/rules:ro \
   -e ES_HOST=elasticsearch -e ES_PORT=9200 -e ES_API_KEY=... \
-  elastalert-rs
+  elastalert3
 ```
 
 - Image: Debian slim, non-root (uid 10001), about 140 MB. `sh` is present for the `command` alerter.
 - The working directory is `/opt/elastalert`, so `rules_folder: rules` means `/opt/elastalert/rules`.
 - Default command: `--config /opt/elastalert/config.yaml`. Any other argument replaces it, e.g.
-  `docker run --rm elastalert-rs validate`, `... create-index`, `... test-rule rules/x.yaml --days 1`.
+  `docker run --rm elastalert3 validate`, `... create-index`, `... test-rule rules/x.yaml --days 1`.
 - Environment overrides (same as ElastAlert 2): `ES_HOST`, `ES_HOSTS`, `ES_PORT`, `ES_USERNAME`, `ES_PASSWORD`,
   `ES_API_KEY`, `ES_BEARER`, `ES_USE_SSL`, `ES_URL_PREFIX`.
 - Environment variables are also expanded inside the YAML files (`$VAR`, `${VAR}`), like ElastAlert 2 does.
@@ -380,7 +383,7 @@ Tested on Elasticsearch 8.15.5: same alerts as ElastAlert 2 (`tests/parity/rules
 
 Deliberate or unavoidable differences in behaviour:
 
-| Topic | ElastAlert 2 | elastalert-rs |
+| Topic | ElastAlert 2 | elastalert3 |
 | --- | --- | --- |
 | Documents fetched | whole `_source` for every hit | only the fields the rule type uses; the full document is fetched (`_mget`) for the few matches. Same alert text. Set `fetch_full_source: true` or `include:` to opt out |
 | Failed alerter | the whole alert is marked unsent and every alerter is resent | per-alerter status in `alerters_sent` (`slack`, then `slack#2`, ... for the same alerter used twice); only failed alerters are retried (30 s doubling, max 1 h, until `alert_time_limit`) |
@@ -404,16 +407,16 @@ Deliberate or unavoidable differences in behaviour:
 | Discover filters | `meta.value` keeps the key order of the YAML | keys are sorted (display text of the filter pill only) |
 | `TimeEnhancement` with `frequency`, `spike`, `flatline`, `cardinality` | the sentence about the time range is built from the rewritten `@timestamp`, with a time zone that depends on the host | the sentence is left out, because the timestamp is no longer one |
 
-New options that ElastAlert 2 does not have: the `correlation` rule type (`correlation_steps`, `ordered`), `ingest_timestamp_field`, `fetch_full_source`, `use_pit`, `validate`, `--es_debug_trace` with responses, the `rust.*` match enhancements (a rule using one does not load in ElastAlert 2).
+New options that ElastAlert 2 does not have: the `correlation` rule type (`correlation_steps`, `ordered`), `active_hours`, `ingest_timestamp_field`, `fetch_full_source`, `use_pit`, `validate`, `--es_debug_trace` with responses, the `rust.*` match enhancements (a rule using one does not load in ElastAlert 2).
 
 ## Performance
 
 Measured on 2026-10-24 on one machine (24 threads, 30 GB; Elasticsearch 8.15.5 single node with a 2 GB heap in Docker, same host for both programs;
-elastalert-rs 1.2.0 release build, ElastAlert 2.31.0 from its wheel), rule time taken from each daemon's own `time_taken` field in the status document,
-peak memory from `getrusage`. elastalert-rs: three runs, ElastAlert 2: two runs; the figures are the median. These are not a benchmark suite; your data and hardware will differ.
+elastalert3 3.2.0 release build, ElastAlert 2.31.0 from its wheel), rule time taken from each daemon's own `time_taken` field in the status document,
+peak memory from `getrusage`. elastalert3: three runs, ElastAlert 2: two runs; the figures are the median. These are not a benchmark suite; your data and hardware will differ.
 Reproduce with `bench/` (see `replica/build-log.md`).
 
-| Scenario | ElastAlert 2.31.0 | elastalert-rs |
+| Scenario | ElastAlert 2.31.0 | elastalert3 |
 | --- | --- | --- |
 | Frequency rule over 400,000 documents (1.3 KB each), 3 days, 6 h `buffer_time` | 34.0 s, 389 MB max RSS | 3.0 s, 145 MB max RSS (142 to 160 MB over the three runs), about 11 times faster |
 | Same, hits / matches | 398,769 / 549 | 398,769 / 549, every match body identical |

@@ -1,6 +1,8 @@
-elastalert-rs is an independent Rust reimplementation of the behaviour of
-ElastAlert 2 (https://github.com/jertel/elastalert2), Copyright Yelp and the
-ElastAlert 2 contributors, licensed under the Apache License 2.0.
+elastalert3 (formerly elastalert-rs) is an independent alerting daemon written
+in Rust. It started as a reimplementation of the behaviour of ElastAlert 2
+(https://github.com/jertel/elastalert2), Copyright Yelp and the ElastAlert 2
+contributors, licensed under the Apache License 2.0, and adds features of its
+own. It is not affiliated with Yelp or the ElastAlert 2 maintainers.
 Rule files, configuration keys, log lines and writeback document formats are
 kept compatible with ElastAlert 2 on purpose.
 

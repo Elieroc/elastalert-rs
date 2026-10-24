@@ -29,7 +29,7 @@ RUN apt-get update \
  && chown -R elastalert /opt/elastalert
 
 COPY --from=build /src/target/release/elastalert /usr/local/bin/elastalert
-COPY NOTICE /usr/share/doc/elastalert-rs/NOTICE
+COPY NOTICE /usr/share/doc/elastalert3/NOTICE
 
 USER elastalert
 WORKDIR /opt/elastalert

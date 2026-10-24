@@ -1,4 +1,4 @@
-# Architecture: elastalert-rs (Rust rebuild of ElastAlert 2 core, performance-first)
+# Architecture: elastalert-rs, now elastalert3 (Rust rebuild of ElastAlert 2 core, performance-first)
 
 Input: `replica/recon.md`, `replica/features.csv`. Goal from user: rewrite in Rust, fix the original's weaknesses, maximise performance.
 Contract: existing ElastAlert 2 rule YAML + `config.yaml` run unchanged; writeback docs keep the same shapes (new fields additive only).
