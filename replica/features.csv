@@ -37,6 +37,7 @@ Resume from last endtime in writeback status (old_query_limit),scheduler,must,ye
 Per-rule scheduler with run_every jitter and random first-run offset (0-15s),scheduler,must,yes,yes,"tokio task per rule, semaphore(max_threads), jitter, 0-15 s first offset"
 Internal jobs: pending-alerts + config-change every run_every,scheduler,must,yes,yes,config reload + silence refresh in the main loop; pending retries run at the start of each rule run; no apscheduler
 limit_execution (cron) + limit_execution_coverage,scheduler,could,yes,yes,"cron in UTC via croner; tested live (pauses outside the window, runs inside); not applied to --debug/--start replays"
+active_hours (extension),scheduler,could,no,yes,"matches outside timezone-aware day/time windows are ignored; decided on the match timestamp; not in upstream"
 --start NOW / ISO and --end (single run then exit),cli,must,yes,yes,
 --rule single rule; --debug; --verbose; --config; --patience; --pin_rules; --es_debug; --es_debug_trace,cli,must,yes,yes,--es_debug logs requests; --es_debug_trace appends curl commands + responses to a file
 --silence unit=n [--silence_qk_value],cli,must,yes,yes,

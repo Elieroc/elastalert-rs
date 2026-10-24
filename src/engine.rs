@@ -687,6 +687,13 @@ impl RuleState {
         for mut m in matches {
             m.insert("num_hits".into(), json!(self.hits));
             m.insert("num_matches".into(), json!(num_matches));
+            if let Some(hours) = &self.rule.active_hours {
+                let ts = field::lookup(&m, &self.rule.timestamp_field).and_then(|v| parse_ts(&self.rule, v)).unwrap_or_else(now);
+                if !hours.contains(ts) {
+                    log::info!("Ignoring match for rule {} outside active_hours", self.rule.name);
+                    continue;
+                }
+            }
             let mut key = self.rule.realert_key.clone();
             let qv = self.rtype.silence_key(&m).or_else(|| self.rule.query_key.as_ref().and_then(|qk| field::lookup(&m, qk)).map(py_str));
             if let Some(qv) = qv {

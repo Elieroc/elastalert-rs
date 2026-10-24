@@ -6,6 +6,7 @@ mod engine;
 mod enhancements;
 mod es;
 mod field;
+mod hours;
 mod index;
 mod metrics;
 mod notify;

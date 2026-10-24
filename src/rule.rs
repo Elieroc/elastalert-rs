@@ -105,6 +105,8 @@ pub struct Rule {
     pub limit_execution: Option<String>,
     /// `limit_execution_coverage`: do not catch up on the time skipped between two active periods.
     pub limit_execution_coverage: bool,
+    /// `active_hours` (extension): matches whose timestamp falls outside these windows are ignored.
+    pub active_hours: Option<crate::hours::ActiveHours>,
     pub kibana_discover: bool,
     pub opensearch_discover: bool,
     pub enhancements: Vec<std::sync::Arc<dyn Enhancement>>,
@@ -333,6 +335,10 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
             Some(c.clone())
         }
         Some(_) => bail!("limit_execution must be a cron expression string"),
+    };
+    let active_hours = match raw.get("active_hours") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(crate::hours::ActiveHours::parse(v)?),
     };
     let (kibana_discover, opensearch_discover) = (flag(&raw, "generate_kibana_discover_url"), flag(&raw, "generate_opensearch_discover_url"));
     if kibana_discover {
@@ -603,6 +609,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         max_query_size,
         limit_execution,
         limit_execution_coverage: flag(&raw, "limit_execution_coverage"),
+        active_hours,
         kibana_discover,
         opensearch_discover,
         enhancements,
@@ -801,6 +808,15 @@ mod tests {
         let conf = Config::load_with_defaults(&dir.join("none.yaml")).unwrap();
         assert_eq!(load(&file, &conf).unwrap().alerts, ["jira", "debug", "email", "slack"]);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn active_hours_is_validated() {
+        let r = load_text("ah_ok", "active_hours:\n  timezone: Europe/Paris\n  windows:\n  - {days: [mon, fri], from: '08:00', to: '18:30'}\n").unwrap();
+        assert!(r.active_hours.is_some());
+        assert!(load_text("ah_none", "").unwrap().active_hours.is_none());
+        let err = load_text("ah_bad", "active_hours:\n  timezone: Nowhere/City\n  windows: [{from: '08:00', to: '09:00'}]\n").err().unwrap();
+        assert!(format!("{err:#}").contains("active_hours"), "{err:#}");
     }
 
     #[test]
