@@ -28,6 +28,21 @@ pub struct Iris {
     http: Http,
 }
 
+/// `iris_alert_tags` (comma-separated) followed by the rule's `mitre_attack` tags.
+fn with_attack_tags(tags: Value, rule: &Rule) -> Value {
+    let extra = crate::mitre::tags(&rule.mitre_attack);
+    if extra.is_empty() {
+        return tags;
+    }
+    let mut all = match &tags {
+        Value::Null => vec![],
+        Value::String(s) if s.is_empty() => vec![],
+        other => vec![py_str(other)],
+    };
+    all.extend(extra);
+    json!(all.join(","))
+}
+
 impl Iris {
     pub(super) fn new(rule: &Rule) -> Result<Iris> {
         required(rule, "iris", "iris_host")?;
@@ -48,7 +63,7 @@ impl Iris {
             case_template_id: opt(rule, "iris_case_template_id", Value::Null),
             note: opt(rule, "iris_alert_note", Value::Null),
             source: opt(rule, "iris_alert_source", json!("ElastAlert2")),
-            tags: opt(rule, "iris_alert_tags", Value::Null),
+            tags: with_attack_tags(opt(rule, "iris_alert_tags", Value::Null), rule),
             status_id: opt(rule, "iris_alert_status_id", json!(2)),
             source_link: opt(rule, "iris_alert_source_link", Value::Null),
             severity_id: opt(rule, "iris_alert_severity_id", json!(1)),
@@ -173,6 +188,14 @@ mod tests {
                 "alert_iocs": [{"ioc_value": "10.0.0.1", "ioc_type_id": 76}], "alert_context": {"who": "bob", "absent": ""}
             })
         );
+    }
+
+    #[test]
+    fn mitre_attack_tags_follow_the_rule_tags() {
+        let tags = |extra: &str| Iris::new(&rule("iris", &format!("iris_host: x\niris_api_token: tok\n{extra}")).unwrap()).unwrap().tags;
+        assert_eq!(tags("iris_alert_tags: a,b\nmitre_attack: [T1059.001]\n"), json!("a,b,attack.t1059.001,attack.execution"));
+        assert_eq!(tags("mitre_attack: [T1059.001]\n"), json!("attack.t1059.001,attack.execution"));
+        assert_eq!(tags(""), Value::Null);
     }
 
     #[tokio::test]

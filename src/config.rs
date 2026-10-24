@@ -1,9 +1,11 @@
 //! Global `config.yaml`: env expansion, env overrides, required keys, defaults.
 
+use crate::mitre::Attack;
 use crate::time::{Dur, MINUTE, parse_duration_map};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct Config {
     /// Every key from the file (after overrides). Rules inherit the ones they don't set.
@@ -21,6 +23,8 @@ pub struct Config {
     pub max_threads: usize,
     pub skip_invalid: bool,
     pub custom_pretty_ts_format: Option<String>,
+    /// The ATT&CK release `mitre_attack` is checked against: built in, or `mitre_attack_data`.
+    pub attack: Arc<Attack>,
 }
 
 const REQUIRED: [&str; 5] = ["run_every", "es_host", "es_port", "writeback_index", "buffer_time"];
@@ -127,7 +131,13 @@ impl Config {
             Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(PathBuf::from)).collect(),
             _ => bail!("{} must contain rules_folder", path.display()),
         };
+        let attack = match raw.get("mitre_attack_data") {
+            None | Some(Value::Null) => Attack::embedded(),
+            Some(Value::String(p)) => Arc::new(Attack::from_stix_file(Path::new(p))?),
+            Some(_) => bail!("mitre_attack_data must be the path of an enterprise-attack.json STIX bundle"),
+        };
         Ok(Config {
+            attack,
             run_every: dur("run_every", 0)?,
             buffer_time: dur("buffer_time", 0)?,
             old_query_limit: dur("old_query_limit", 7 * 24 * 60 * MINUTE)?,

@@ -1048,6 +1048,9 @@ impl RuleState {
             doc.insert("owner".into(), json!(text("owner", "")));
             doc.insert("priority".into(), json!(text("priority", "2")));
         }
+        if let Some(m) = crate::mitre::writeback(&self.rule.mitre_attack) {
+            doc.insert("mitre_attack".into(), m);
+        }
     }
 
     /// Writes the alert doc(s) for `p`: one per match, same `_id` every time so updates overwrite.

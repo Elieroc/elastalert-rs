@@ -135,6 +135,8 @@ pub struct Rule {
     pub query_lang: Option<QueryLang>,
     /// `correlation` rules: the leaves to correlate on `query_key`, and how.
     pub correlation: Option<CorrelationSpec>,
+    /// `mitre_attack` (extension): the ATT&CK techniques the rule detects, checked against the ATT&CK table.
+    pub mitre_attack: Vec<crate::mitre::Technique>,
     /// The merged rule document; alert text and alerters read arbitrary keys from it.
     pub raw: Map<String, Value>,
 }
@@ -363,6 +365,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         None | Some(Value::Null) => None,
         Some(v) => Some(crate::hours::ActiveHours::parse(v)?),
     };
+    let mitre_attack = crate::mitre::parse(raw.get("mitre_attack"), &conf.attack, &name)?;
     let (kibana_discover, opensearch_discover) = (flag(&raw, "generate_kibana_discover_url"), flag(&raw, "generate_opensearch_discover_url"));
     if kibana_discover {
         crate::discover::validate_kibana(&raw)?;
@@ -637,6 +640,7 @@ pub fn load(file: &Path, conf: &Config) -> Result<Rule> {
         limit_execution,
         limit_execution_coverage: flag(&raw, "limit_execution_coverage"),
         active_hours,
+        mitre_attack,
         kibana_discover,
         opensearch_discover,
         enhancements,

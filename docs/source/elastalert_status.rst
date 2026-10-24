@@ -51,6 +51,7 @@ elastalert
 - ``match_body``: This is the contents of the match dictionary that is used to create the alert. The subfields may include a number of things containing information about the alert.
 - ``alert_exception``: This field is only present when the alert failed because of an exception occurring, and will contain the exception information.
 - ``alerters_sent``: (ElastAlert 3, additional field) The alerters that delivered this alert, such as ``["slack", "email"]``. The same alerter used twice in a rule appears as ``slack``, then ``slack#2``. After a partial failure, only the alerters missing from this list are retried (every 30 seconds, doubling up to one hour, until ``alert_time_limit``).
+- ``mitre_attack``: (ElastAlert 3, additional field) Only present when the rule sets :ref:`mitre_attack <mitre_attack>`: ``{techniques: ["T1059.001"], tactics: ["execution"]}``, both mapped as ``keyword``.
 - ``aggregate_id``: This field is only present when the rule is configured to use aggregation. The first alert of the aggregation period will contain an alert_time set to the aggregation time into the future, and subsequent alerts will contain the document ID of the first. When the alert_time is reached, all alerts with that aggregate_id will be sent together.
 
 elastalert_error

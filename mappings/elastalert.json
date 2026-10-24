@@ -34,6 +34,16 @@
     },
     "aggregate_id": {
       "type": "keyword"
+    },
+    "mitre_attack": {
+      "properties": {
+        "techniques": {
+          "type": "keyword"
+        },
+        "tactics": {
+          "type": "keyword"
+        }
+      }
     }
   }
 }

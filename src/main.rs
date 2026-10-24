@@ -10,6 +10,7 @@ mod field;
 mod hours;
 mod index;
 mod metrics;
+mod mitre;
 mod notify;
 mod querylang;
 mod rule;
@@ -107,6 +108,8 @@ enum Cmd {
     TestRule(testrule::TestRuleArgs),
     /// Load the config and every rule (including alerter options) and report errors; no Elasticsearch needed
     Validate,
+    /// Write an ATT&CK Navigator layer of the techniques the rules cover (mitre_attack); no Elasticsearch needed
+    MitreLayer(mitre::LayerArgs),
 }
 
 struct Logger(log::LevelFilter);
@@ -452,6 +455,9 @@ async fn main() -> Result<()> {
     let conf = Config::load(&args.config)?;
     if let Some(Cmd::Validate) = &args.cmd {
         return testrule::validate(&conf);
+    }
+    if let Some(Cmd::MitreLayer(m)) = &args.cmd {
+        return mitre::layer_cmd(m, &conf);
     }
     let es = Es::from_conf(&conf.raw)?.with_tracing(args.es_debug, args.es_debug_trace.as_deref())?;
 

@@ -301,6 +301,10 @@ Options specific to ElastAlert 3
 ``use_pit``: Use point in time + ``search_after`` to page through results when the cluster supports it
 (Elasticsearch 7.12 and newer). Set to ``false`` to always use scroll. (Optional, boolean, default ``true``)
 
+``mitre_attack_data``: Path of an ``enterprise-attack.json`` STIX bundle from
+`MITRE <https://github.com/mitre-attack/attack-stix-data>`_. The :ref:`mitre_attack <mitre_attack>` rule option is
+checked against this bundle instead of the included copy of Enterprise ATT&CK (v20). (Optional, string, no default)
+
 ``statsd_host``, ``statsd_instance_tag``: not supported, ignored. Use the Prometheus endpoint, see
 :doc:`recipes/exposing_rule_metrics`.
 

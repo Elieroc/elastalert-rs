@@ -78,6 +78,29 @@ runs a single rule. See :doc:`flags` and :ref:`Testing your rule <testing>`.
 
 Stop the daemon with ``SIGTERM``: running rules finish and the writeback buffer is flushed (10 seconds limit).
 
+.. _mitre_layer:
+
+ATT&CK Navigator layer
+----------------------
+
+.. admonition:: ElastAlert 3
+   :class: ea3
+
+   New in ElastAlert 3.
+
+::
+
+    $ elastalert --config config.yaml mitre-layer -o coverage.json
+
+``mitre-layer`` loads every rule, like ``validate``, and writes an `ATT&CK Navigator
+<https://mitre-attack.github.io/attack-navigator/>`_ layer (format 4.5) of their :ref:`mitre_attack <mitre_attack>`
+techniques. Open the file in Navigator with *Open Existing Layer*. Elasticsearch is not needed.
+
+The layer has one cell per technique and tactic. The cell's score is the number of rules that cover it, and its
+comment and metadata name those rules and their files. Rules with ``is_enabled: false`` are left out unless you pass
+``--include-disabled``; they are then marked ``(disabled)``. Other options: ``--name`` (the layer name), and no
+``-o`` to write to standard output.
+
 .. _docker-instructions:
 
 As a Docker container

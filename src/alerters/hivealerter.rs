@@ -133,6 +133,7 @@ impl Hive {
             artifacts.extend(self.observables(v.rule, m));
             tags.extend(Self::tags(v.rule, &cfg["tags"], m));
         }
+        tags.extend(crate::mitre::tags(&v.rule.mitre_attack));
         cfg.insert("artifacts".into(), Value::Array(artifacts));
         cfg.insert("tags".into(), json!(tags));
         if let Some(m) = matches.first() {
@@ -195,6 +196,15 @@ mod tests {
         );
         assert_eq!(p["sourceRef"].as_str().unwrap().len(), 36);
         assert!(p["description"].as_str().unwrap().starts_with("r\n\n"));
+    }
+
+    #[test]
+    fn mitre_attack_tags_are_added() {
+        let r = rule("hivealerter", &format!("{CFG}mitre_attack: [{{technique: T1078, tactic: initial-access}}]\n")).unwrap();
+        let rt = RuleType::new(&r).unwrap();
+        let v = View { rule: &r, rtype: &rt, ts_fmt: None, pipeline: &Default::default() };
+        let p = Hive::new(&r).unwrap().payload(&v, &[m()], 0).unwrap();
+        assert_eq!(p["tags"], json!(["a", "attack.initial_access", "attack.t1078", "b", "bob", "fixed"]));
     }
 
     #[test]

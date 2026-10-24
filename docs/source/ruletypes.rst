@@ -11,10 +11,10 @@ ElastAlert 2 repository; they run unchanged in ElastAlert 3.
    with a message (or skipped with ``skip_invalid: true``); it is never run with a different behaviour. Options not
    listed anywhere are ignored, as in ElastAlert 2, so typos are not detected.
 
-   Options new in ElastAlert 3: :ref:`active_hours <active_hours>`, :ref:`ingest_timestamp_field <ingest_timestamp_field>`,
+   Options new in ElastAlert 3: :ref:`active_hours <active_hours>`, :ref:`mitre_attack <mitre_attack>`, :ref:`ingest_timestamp_field <ingest_timestamp_field>`,
    :ref:`fetch_full_source <fetch_full_source>`, the :ref:`correlation <correlation>` rule type and the ``rust.*``
    :doc:`match enhancements <enhancements>`. A rule using one of them does not run in ElastAlert 2 (it ignores
-   ``active_hours``, ``ingest_timestamp_field`` and ``fetch_full_source``).
+   ``active_hours``, ``mitre_attack``, ``ingest_timestamp_field`` and ``fetch_full_source``).
 
 .. _commonconfig:
 
@@ -1275,6 +1275,45 @@ to ``test-rule``. Compare with ``limit_execution``, which stops the rule itself.
       - days: [sat]
         from: "22:00"      # Saturday 22:00 to Sunday 06:00
         to: "06:00"
+
+.. _mitre_attack:
+
+mitre_attack
+^^^^^^^^^^^^
+
+.. admonition:: ElastAlert 3
+   :class: ea3
+
+   New in ElastAlert 3. ElastAlert 2 ignores the key, so the rule still runs there.
+
+``mitre_attack``: The MITRE ATT&CK techniques the rule detects. It does not change what the rule matches. It is
+written to the alert documents, passed to some alerters and exported as an ATT&CK Navigator layer by
+``elastalert mitre-layer`` (see :ref:`mitre_layer`). (Optional, a technique ID or a list, no default)
+
+Each entry is a technique or sub-technique ID (``T1078``, ``T1059.001``), or a map ``{technique: ID, tactic: name}``
+to file a technique that belongs to several tactics under only one of them. Without ``tactic``, the technique counts
+under every tactic it belongs to. Tactics are ATT&CK short names, such as ``initial-access``. ``Initial Access`` and
+``initial_access`` are also accepted.
+
+.. code-block:: yaml
+
+    mitre_attack:
+    - T1059.001
+    - technique: T1078
+      tactic: initial-access
+
+The rule is **rejected at load** if an ID is malformed, is not a technique of Enterprise ATT&CK, or the tactic is not
+one of the technique's. A deprecated or revoked technique loads with a warning that names its replacement, so a new
+ATT&CK release never stops a rule. ElastAlert 3 includes a copy of Enterprise ATT&CK (v20). To check against another
+release, set ``mitre_attack_data`` in ``config.yaml`` (see :ref:`ea3_config`).
+
+The techniques are used in these places:
+
+- Writeback: every alert document gets ``mitre_attack: {techniques: [...], tactics: [...]}``.
+- Jinja: in ``alert_text_type: alert_text_jinja`` templates, ``mitre_attack`` is a list of
+  ``{id, name, tactics, url}``. With ``alert_text_args``, ``mitre_attack`` gives the value as written in the rule.
+- ``hivealerter`` and ``iris``: tags in Sigma's spelling (``attack.t1059.001``, ``attack.execution``) are added after
+  the configured tags.
 
 .. _ingest_timestamp_field:
 

@@ -66,6 +66,9 @@ fn arg_value(rule: &Rule, m: &Map<String, Value>, name: &str, missing: &str) -> 
 /// Renders a Jinja template with `rule | match` (match wins) also available under `jinja_root_name`.
 fn render_jinja(rule: &Rule, source: &str, m: &Map<String, Value>) -> String {
     let mut values = rule.raw.clone();
+    if !rule.mitre_attack.is_empty() {
+        values.insert("mitre_attack".into(), crate::mitre::jinja(&rule.mitre_attack));
+    }
     values.extend(m.clone());
     let root = rule_str(rule, "jinja_root_name").unwrap_or("_data").to_string();
     values.insert(root, Value::Object(values.clone()));
