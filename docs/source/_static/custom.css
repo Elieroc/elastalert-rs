@@ -1,0 +1,17 @@
+/* "ElastAlert 3" notes: behaviour that differs from ElastAlert 2 or is new. */
+.rst-content .admonition.ea3 {
+    background: #fdf2f2;
+}
+.rst-content .admonition.ea3 .admonition-title {
+    background: #e5484d;
+}
+.rst-content .admonition.ea3 .admonition-title::before {
+    content: "\f05a";
+}
+
+/* Wide compatibility tables wrap instead of scrolling sideways. */
+.rst-content table.docutils td,
+.rst-content table.docutils th {
+    white-space: normal;
+    vertical-align: top;
+}

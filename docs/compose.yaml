@@ -1,0 +1,12 @@
+# Documentation site on port 80. From the repository root:
+#   docker compose -f docs/compose.yaml up -d --build
+services:
+  docs:
+    build:
+      context: ..
+      dockerfile: docs/Dockerfile
+    image: elastalert3-docs:local
+    container_name: elastalert3-docs
+    ports:
+      - "80:80"
+    restart: unless-stopped

@@ -6,4 +6,7 @@ own. It is not affiliated with Yelp or the ElastAlert 2 maintainers.
 Rule files, configuration keys, log lines and writeback document formats are
 kept compatible with ElastAlert 2 on purpose.
 
+The documentation in docs/source is derived from the ElastAlert 2
+documentation (Apache License 2.0), modified to describe elastalert3.
+
 This project is licensed under the Apache License, Version 2.0 (see LICENSE).
